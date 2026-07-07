@@ -1,0 +1,23 @@
+.venv/*
+.env
+.env.local
+
+# Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/next-env.d.ts
+
+.pytest_cache/*
+.claude/*
+__pycache__/*
+api/routes/__pycache__/*
+agents/__pycache__/*
+agents/prompts/__pycache__/*
+api/__pycache__/*
+agents/tools/__pycache__/*
+tests/__pycache__/*
+tests/e2e/__pycache__/*
+
+tests/agents/__pycache__/*
+tests/tools/__pycache__/*
+voice/__pycache__/*

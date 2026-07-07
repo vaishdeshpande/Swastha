@@ -1,0 +1,19 @@
+languages:
+  hi-IN:
+    name: Hindi
+    tts_voice: priya
+    tts_model: bulbul:v3
+    greeting: "नमस्ते! मैं आपकी कैसे मदद कर सकती हूँ?"
+    enabled: true
+
+  mr-IN:
+    name: Marathi
+    tts_voice: kavya
+    tts_model: bulbul:v3
+    greeting: "नमस्कार! मी तुम्हाला कशी मदत करू शकते?"
+    enabled: true
+
+  # Phase 2 — add any of these with zero code changes:
+  # kn-IN: { name: Kannada, tts_voice: roopa, tts_model: bulbul:v3, greeting: "...", enabled: false }
+  # ta-IN: { name: Tamil, tts_voice: kavitha, tts_model: bulbul:v3, greeting: "...", enabled: false }
+  # te-IN: { name: Telugu, tts_voice: ..., tts_model: bulbul:v3, greeting: "...", enabled: false }

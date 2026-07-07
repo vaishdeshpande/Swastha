@@ -1,0 +1,124 @@
+"""Agent 4 — Prescription Reminder.
+
+Handles existing patients asking about their medication schedule. Doctor
+notes are always in English and must be translated before being read out.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+from sarvamai import SarvamAI
+
+from agents.prompts.prescription import build_prescription_prompt
+from agents.state import AgentState
+from agents.tools.db_tools import get_prescription, log_query, mark_reminder_sent
+from agents.tools.llm_json import extract_json
+from agents.tools.translate_tools import translate_text
+
+logger = logging.getLogger(__name__)
+
+client = SarvamAI(api_subscription_key=os.environ["SARVAM_API_KEY"])
+
+
+async def _answer_prescription_query(state: AgentState, prescription_context: dict | None) -> dict:
+    """Calls sarvam-30b to answer the patient's question against the known
+    prescription context only. Returns the parsed JSON decision dict."""
+    system_prompt = build_prescription_prompt(state["lang_code"], prescription_context)
+    response = client.chat.completions(
+        messages=[{"role": "system", "content": system_prompt}, *state["messages"]],
+        model="sarvam-30b",
+    )
+    reply = response.choices[0].message.content
+    parsed = extract_json(reply)
+    if parsed is None:
+        logger.warning("prescription: LLM reply wasn't parseable JSON, using raw reply: %r", reply)
+        return {"reply": reply, "escalate": False}
+    return parsed
+
+
+async def prescription_node(state: AgentState) -> AgentState:
+    state["current_agent"] = "prescription"
+    lang_code = state["lang_code"]
+    messages = [*state["messages"]]
+    logger.info("prescription: start (call_id=%s, patient_id=%s)", state.get("call_id"), state.get("patient_id"))
+
+    try:
+        prescription = await get_prescription(state["patient_id"])
+        logger.info("prescription: fetched prescription with %d medicine(s)", len(prescription.get("medicines", [])))
+    except ValueError:
+        logger.warning("prescription: no prescription on file for patient_id=%s — escalating", state.get("patient_id"))
+        reply = await translate_text(
+            "I don't see a prescription on file for you. Let me connect you to a staff member who can help.",
+            source_lang="en-IN",
+            target_lang=lang_code,
+        )
+        messages.append({"role": "assistant", "content": reply})
+        return {
+            **state,
+            "messages": messages,
+            "escalation_required": True,
+            "escalation_reason": "No prescription on file for patient",
+        }
+
+    logger.debug("prescription: translating doctor notes to lang_code=%s", lang_code)
+    notes_translated = await translate_text(
+        prescription["notes_en"], source_lang="en-IN", target_lang=lang_code
+    )
+    prescription_context = {
+        "medicines": prescription["medicines"],
+        "notes": notes_translated,
+        "refill_date": prescription["refill_date"],
+    }
+
+    decision = await _answer_prescription_query(state, prescription_context)
+    reply = decision.get("reply", "")
+    messages.append({"role": "assistant", "content": reply})
+
+    await log_query(state["patient_id"], query=state["messages"][-1]["content"], response=reply)
+    logger.info("prescription: query logged for patient_id=%s", state.get("patient_id"))
+
+    if decision.get("escalate"):
+        logger.warning("prescription: question beyond scope — escalating (patient_id=%s)", state.get("patient_id"))
+        return {
+            **state,
+            "messages": messages,
+            "escalation_required": True,
+            "escalation_reason": "Prescription question beyond scope — patient referred to doctor",
+        }
+
+    logger.info("prescription: answered successfully (call_id=%s)", state.get("call_id"))
+    return {**state, "messages": messages}
+
+
+async def prescription_outbound_node(state: AgentState) -> AgentState:
+    """Cron-driven medication reminder call.
+
+    Script: "Namaste, yeh aapki dawai ki yaad dilaane ke liye call hai. Aapko
+    [medicine name] subah aur shaam leni hai." — confirms the patient
+    understood, then logs the reminder as sent.
+    """
+    state["current_agent"] = "prescription_outbound"
+    lang_code = state["lang_code"]
+    logger.info("prescription_outbound: start (call_id=%s, patient_id=%s)", state.get("call_id"), state.get("patient_id"))
+
+    try:
+        prescription = await get_prescription(state["patient_id"])
+        logger.info("prescription_outbound: fetched prescription for patient_id=%s", state.get("patient_id"))
+    except ValueError:
+        logger.warning(
+            "prescription_outbound: no prescription on file for patient_id=%s, closing job",
+            state.get("patient_id"),
+        )
+        return {**state, "call_outcome": {"reminder_sent": False, "reason": "no prescription on file"}}
+
+    medicine_names = ", ".join(m["name"] for m in prescription["medicines"])
+    script_en = f"This is a reminder call about your medication: {medicine_names}. Please take it as prescribed."
+    script = await translate_text(script_en, source_lang="en-IN", target_lang=lang_code)
+    messages = [*state["messages"], {"role": "assistant", "content": script}]
+
+    await mark_reminder_sent(state["patient_id"])
+    logger.info("prescription_outbound: reminder sent and marked for patient_id=%s", state.get("patient_id"))
+
+    return {**state, "messages": messages, "call_outcome": {"reminder_sent": True}}

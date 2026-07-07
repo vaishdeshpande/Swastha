@@ -1,0 +1,420 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Devanagari font */
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Devanagari:wght@400;500;600&display=swap');
+
+:root {
+  --neo-bg: #e8eaf0;
+  --neo-shadow-light: #ffffff;
+  --neo-shadow-dark: #c5c8d2;
+  --neo-text: #4a4f6a;
+  --neo-text-muted: #8b90a8;
+  --neo-accent: #6c72cb;
+  --neo-accent-light: #eef0ff;
+  --neo-green: #5dba8a;
+  --neo-red: #e07070;
+  --neo-amber: #e0a870;
+
+  --neo-out-sm: 4px 4px 10px var(--neo-shadow-dark), -4px -4px 10px var(--neo-shadow-light);
+  --neo-out-md: 6px 6px 14px var(--neo-shadow-dark), -6px -6px 14px var(--neo-shadow-light);
+  --neo-out-lg: 10px 10px 24px var(--neo-shadow-dark), -10px -10px 24px var(--neo-shadow-light);
+
+  --neo-in-sm: inset 3px 3px 8px var(--neo-shadow-dark), inset -3px -3px 8px var(--neo-shadow-light);
+  --neo-in-md: inset 4px 4px 10px var(--neo-shadow-dark), inset -4px -4px 10px var(--neo-shadow-light);
+  --neo-in-hard: inset 5px 5px 12px var(--neo-shadow-dark), inset -5px -5px 12px var(--neo-shadow-light);
+
+  --neo-radius-sm: 10px;
+  --neo-radius-md: 16px;
+  --neo-radius-lg: 20px;
+  --neo-radius-xl: 28px;
+  --neo-radius-full: 9999px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --neo-bg: #1e2130;
+    --neo-shadow-light: #2a2f45;
+    --neo-shadow-dark: #13161f;
+    --neo-text: #c8ccde;
+    --neo-text-muted: #6b7090;
+    --neo-accent: #8b91e0;
+    --neo-accent-light: #2a2d4a;
+    --neo-green: #4aab7a;
+    --neo-red: #d06060;
+    --neo-amber: #c99860;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background: var(--neo-bg);
+  color: var(--neo-text);
+  min-height: 100vh;
+  font-family: 'Noto Sans Devanagari', 'Segoe UI', system-ui, sans-serif;
+}
+
+/* ---- Layout surfaces ---- */
+
+.neo-screen {
+  background: var(--neo-bg);
+  border-radius: var(--neo-radius-xl);
+  padding: 1.5rem;
+  box-shadow: var(--neo-out-lg);
+  max-width: 960px;
+  margin: 2rem auto;
+}
+
+.neo-card {
+  background: var(--neo-bg);
+  border-radius: var(--neo-radius-lg);
+  padding: 1.25rem;
+  box-shadow: var(--neo-out-md);
+}
+
+.neo-inset {
+  background: var(--neo-bg);
+  border-radius: var(--neo-radius-md);
+  box-shadow: var(--neo-in-md);
+  padding: 0.75rem 1rem;
+}
+
+/* ---- Buttons ---- */
+
+.neo-btn {
+  background: var(--neo-bg);
+  border: none;
+  border-radius: var(--neo-radius-md);
+  box-shadow: var(--neo-out-sm);
+  color: var(--neo-text);
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, transform 0.1s ease;
+}
+
+.neo-btn:hover {
+  box-shadow: var(--neo-out-md);
+}
+
+.neo-btn:active,
+.neo-btn.pressed {
+  box-shadow: var(--neo-in-hard);
+  transform: scale(0.98);
+}
+
+.neo-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.neo-lang-btn {
+  flex: 1;
+  padding: 8px 4px;
+  border-radius: var(--neo-radius-sm);
+  border: none;
+  background: var(--neo-bg);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--neo-text-muted);
+  cursor: pointer;
+  box-shadow: var(--neo-out-sm);
+  transition: all 0.15s;
+}
+
+.neo-lang-btn.active {
+  box-shadow: var(--neo-in-md);
+  color: var(--neo-accent);
+}
+
+.neo-lang-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.neo-btn-call-start {
+  width: 72px;
+  height: 72px;
+  border-radius: var(--neo-radius-full);
+  background: var(--neo-green);
+  border: none;
+  cursor: pointer;
+  box-shadow: var(--neo-out-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+.neo-btn-call-start:active {
+  box-shadow: var(--neo-in-hard);
+  transform: scale(0.95);
+}
+.neo-btn-call-start:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.neo-btn-call-end {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--neo-radius-full);
+  background: var(--neo-red);
+  border: none;
+  cursor: pointer;
+  box-shadow: var(--neo-out-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+.neo-btn-call-end:active {
+  box-shadow: var(--neo-in-hard);
+  transform: scale(0.95);
+}
+
+/* ---- Status badge ---- */
+
+.neo-status-badge {
+  background: var(--neo-bg);
+  border-radius: var(--neo-radius-full);
+  padding: 6px 14px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--neo-accent);
+  box-shadow: var(--neo-in-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.neo-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--neo-text-muted);
+}
+.neo-status-dot.listening { background: var(--neo-green); animation: neo-blink 1.2s infinite; }
+.neo-status-dot.processing { background: var(--neo-amber); animation: neo-blink 0.8s infinite; }
+.neo-status-dot.speaking { background: var(--neo-accent); animation: neo-blink 1s infinite; }
+.neo-status-dot.dropped { background: var(--neo-red); }
+
+@keyframes neo-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+/* ---- Pulse ring ---- */
+
+.neo-pulse-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.neo-pulse-ring {
+  position: absolute;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  animation: neo-pulse 1.8s ease-out infinite;
+  pointer-events: none;
+}
+
+@keyframes neo-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(93, 186, 138, 0.5); }
+  70% { box-shadow: 0 0 0 20px rgba(93, 186, 138, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(93, 186, 138, 0); }
+}
+
+/* ---- Sound waves ---- */
+
+.neo-waves {
+  display: none;
+  align-items: center;
+  gap: 3px;
+  height: 28px;
+}
+
+.neo-waves.active {
+  display: flex;
+}
+
+.neo-wave-bar {
+  width: 3px;
+  border-radius: 3px;
+  background: var(--neo-accent);
+  opacity: 0.7;
+}
+
+.neo-wave-bar:nth-child(1) { height: 8px; animation: neo-wave 1s ease-in-out infinite 0.0s; }
+.neo-wave-bar:nth-child(2) { height: 18px; animation: neo-wave 1s ease-in-out infinite 0.1s; }
+.neo-wave-bar:nth-child(3) { height: 24px; animation: neo-wave 1s ease-in-out infinite 0.2s; }
+.neo-wave-bar:nth-child(4) { height: 18px; animation: neo-wave 1s ease-in-out infinite 0.3s; }
+.neo-wave-bar:nth-child(5) { height: 10px; animation: neo-wave 1s ease-in-out infinite 0.4s; }
+.neo-wave-bar:nth-child(6) { height: 20px; animation: neo-wave 1s ease-in-out infinite 0.15s; }
+.neo-wave-bar:nth-child(7) { height: 14px; animation: neo-wave 1s ease-in-out infinite 0.25s; }
+
+@keyframes neo-wave {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.35); }
+}
+
+/* ---- Agent activity rows ---- */
+
+.neo-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  transition: all 0.2s;
+}
+
+.neo-agent-row.done,
+.neo-agent-row.active {
+  background: var(--neo-bg);
+  box-shadow: var(--neo-in-sm);
+}
+
+.neo-agent-row.pending {
+  opacity: 0.4;
+}
+
+.neo-agent-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.neo-agent-dot.done { background: var(--neo-green); }
+.neo-agent-dot.active { background: var(--neo-accent); animation: neo-blink 1s infinite; }
+.neo-agent-dot.pending { background: var(--neo-shadow-dark); }
+
+.neo-agent-name { font-size: 12px; font-weight: 600; color: var(--neo-text); }
+.neo-agent-sub { font-size: 10px; color: var(--neo-text-muted); margin-top: 1px; }
+
+/* ---- Transcript ---- */
+
+.neo-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.neo-msg-agent {
+  background: var(--neo-bg);
+  border-radius: var(--neo-radius-sm);
+  padding: 7px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 85%;
+  align-self: flex-start;
+  box-shadow: var(--neo-out-sm);
+  color: var(--neo-accent);
+}
+
+.neo-msg-patient {
+  background: var(--neo-accent);
+  border-radius: var(--neo-radius-sm);
+  padding: 7px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 85%;
+  align-self: flex-end;
+  box-shadow: var(--neo-out-sm);
+  color: #ffffff;
+}
+
+.neo-msg-label {
+  font-size: 9px;
+  font-weight: 700;
+  opacity: 0.6;
+  margin-bottom: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ---- Booking confirmation ---- */
+
+.neo-booking-card {
+  background: var(--neo-bg);
+  border-radius: var(--neo-radius-lg);
+  padding: 1rem 1.25rem;
+  box-shadow: var(--neo-out-md);
+  margin-top: 16px;
+}
+
+.neo-booking-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 0.75rem;
+}
+
+.neo-check-circle {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--neo-green);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--neo-out-sm);
+  flex-shrink: 0;
+  color: #fff;
+}
+
+.neo-booking-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.neo-booking-cell {
+  background: var(--neo-bg);
+  border-radius: var(--neo-radius-sm);
+  padding: 8px 10px;
+  box-shadow: var(--neo-in-sm);
+}
+
+.neo-booking-cell-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--neo-text-muted);
+  font-weight: 600;
+}
+
+.neo-booking-cell-val {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--neo-text);
+  margin-top: 2px;
+}
+
+/* ---- Typography ---- */
+
+.neo-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--neo-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 0.75rem;
+}
+
+.neo-text { font-size: 13px; color: var(--neo-text); }
+.neo-text-sm { font-size: 11px; color: var(--neo-text); }
+.neo-text-muted { font-size: 12px; color: var(--neo-text-muted); }
+
+.neo-devanagari {
+  font-family: 'Noto Sans Devanagari', system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.6;
+}
