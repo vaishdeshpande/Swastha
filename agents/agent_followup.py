@@ -9,6 +9,7 @@ import logging
 import os
 from typing import Optional, TypedDict
 
+from langsmith import traceable
 from sarvamai import SarvamAI
 
 from agents.prompts.followup import build_followup_prompt
@@ -42,6 +43,7 @@ def _compute_readmission_risk(fever: bool, pain_level: int, medication_adherence
     return 0.2
 
 
+@traceable(run_type="llm", name="sarvam-30b:followup_checklist")
 async def _run_checklist_turn(state: AgentState, discharge: dict) -> dict:
     """Calls sarvam-30b to ask the next unanswered checklist question, or
     report that all four items have been collected."""
@@ -53,6 +55,8 @@ async def _run_checklist_turn(state: AgentState, discharge: dict) -> dict:
     response = client.chat.completions(
         messages=[{"role": "system", "content": system_prompt}, *state["messages"]],
         model="sarvam-30b",
+        temperature=0.0,
+        max_tokens=2048,
     )
     reply = response.choices[0].message.content
     parsed = extract_json(reply)

@@ -58,6 +58,15 @@ State: offered_slots=[{{"slot_id":"s1","doctor_name":"Dr. Sharma","time":"Mon 10
 Patient: "Pehla wala theek hai"
 → {{"action": "confirm_booking", "date": null, "chosen_slot_id": "s1", "cancel_appointment_id": null, "distress": false, "reply": null}}
 
+── hi-IN: Patient picks slot by time (Hindi clock expression) ──
+State: offered_slots=[{{"slot_id":"s1","doctor_name":"Dr. Priya Sharma","time":"11:00"}},{{"slot_id":"s2","doctor_name":"Dr. Priya Sharma","time":"14:00"}}]
+Patient: "दो बजे ठीक है"
+→ {{"action": "confirm_booking", "date": null, "chosen_slot_id": "s2", "cancel_appointment_id": null, "distress": false, "reply": null}}
+
+Note: "do baje" / "दो बजे" = 2 o'clock = 14:00. "gyarah baje" / "ग्यारह बजे" = 11:00.
+Match the patient's time expression to the closest offered slot — never ask for confirmation
+when the time reference unambiguously maps to one slot.
+
 ── hi-IN: Patient cancels ──
 Patient: "Appointment cancel karna hai, appointment_id A123"
 → {{"action": "cancel", "date": null, "chosen_slot_id": null, "cancel_appointment_id": "A123", "distress": false, "reply": null}}

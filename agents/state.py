@@ -54,6 +54,9 @@ class AgentState(TypedDict):
     # ── Set by Agent 3 (Scheduler) ──
     offered_slots: Optional[List[dict]]     # Slots most recently read out to the patient
     appointment_id: Optional[str]           # Appointment being booked/cancelled/confirmed
+    booked_slot_details: Optional[dict]     # {doctor_name, department, date, time} — captured
+                                            # before offered_slots is cleared; powers the
+                                            # booking_confirmed UI card in livekit_agent
 
     # ── Outbound graph only ──
     job_type: Optional[Literal["confirmation", "rx_reminder", "followup"]]

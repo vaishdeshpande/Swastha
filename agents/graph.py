@@ -79,6 +79,36 @@ async def route_outbound_job_node(state: AgentState) -> AgentState:
 # Routing functions
 # ---------------------------------------------------------------------------
 
+def route_after_language(state: AgentState) -> str:
+    """Skip voice_intake on turns where intake is already resolved.
+
+    Once intent + patient_id are both known, subsequent turns (e.g. patient
+    choosing a slot, asking a follow-up question) go directly to the specialist
+    node. This eliminates the redundant sarvam-30b extraction call that would
+    otherwise run on every turn — ~1.9s TTFT saved per mid-conversation turn.
+    """
+    if state.get("escalation_required", False):
+        return "voice_intake"  # let intake path handle escalation display
+
+    intent = state.get("intent")
+    patient_id = state.get("patient_id")
+
+    specialist_map = {
+        "book": "scheduler",
+        "prescription": "prescription",
+        "lab": "lab_status",
+        "billing": "billing",
+    }
+
+    if intent and patient_id and intent in specialist_map:
+        route = specialist_map[intent]
+        logger.debug("route_after_language: intake resolved, skipping voice_intake -> %s", route)
+        return route
+
+    logger.debug("route_after_language: intake incomplete -> voice_intake")
+    return "voice_intake"
+
+
 def route_after_intake(state: AgentState) -> str:
     """Decides which agent handles the patient's intent.
 
@@ -174,7 +204,19 @@ def build_inbound_graph():
 
     graph.set_entry_point("language_router")
 
-    graph.add_edge("language_router", "voice_intake")
+    # After language detection, skip voice_intake when intake is already resolved —
+    # saves ~1.9s per mid-conversation turn (e.g. patient choosing a slot).
+    graph.add_conditional_edges(
+        "language_router",
+        route_after_language,
+        {
+            "voice_intake": "voice_intake",
+            "scheduler": "scheduler",
+            "prescription": "prescription",
+            "lab_status": "lab_status",
+            "billing": "billing",
+        },
+    )
 
     graph.add_conditional_edges(
         "voice_intake",

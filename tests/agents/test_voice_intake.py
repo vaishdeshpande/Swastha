@@ -32,6 +32,14 @@ def _make_streaming_response(content: str):
             chunk.choices[0].delta.content = self._content
             yield chunk
 
+        def __iter__(self):
+            # Sync streaming — the app iterates the stream inside
+            # asyncio.to_thread (see _sync_stream_extract).
+            chunk = MagicMock()
+            chunk.choices = [MagicMock()]
+            chunk.choices[0].delta.content = self._content
+            yield chunk
+
     return _StreamableResponse(content)
 
 

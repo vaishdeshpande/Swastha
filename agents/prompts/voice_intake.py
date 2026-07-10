@@ -95,6 +95,12 @@ GOAL: 2 turns to route the patient.
 Extract ALL fields mentioned in one message — do not discard info just because you
 didn't ask for it. The "one question per reply" rule applies to what you ASK, not extract.
 
+━━━ COMPLAINT RULE (for booking intent) ━━━
+If intent="book" and the patient has NOT yet mentioned any symptom or complaint,
+your "reply" MUST ask for it — even if you already have their name and phone.
+Set chief_complaint=null until the patient actually states a problem.
+Do NOT route to slots without knowing why the patient is coming.
+
 ━━━ OUTPUT — CRITICAL ━━━
 Your response MUST be a single valid JSON object. No plain text, no markdown fences,
 no explanation. If you write anything other than a JSON object, the system breaks.
@@ -107,7 +113,8 @@ The "reply" key holds the spoken text. Everything else is structured data.
   "age": 0 | null,
   "intent": "book" | "prescription" | "followup" | "query" | "lab" | "billing" | null,
   "department": "general" | "cardiology" | "ortho" | "pediatrics" | "dermatology" | null,
-  "urgency": "normal" | "urgent"
+  "urgency": "normal" | "urgent",
+  "chief_complaint": "..." | null
 }}
 
 ━━━ FEW-SHOT EXAMPLES ━━━
@@ -310,6 +317,7 @@ _FIELD_LABELS = {
     "age": "age",
     "department": "department",
     "urgency": "urgency",
+    "chief_complaint": "chief complaint",
 }
 
 

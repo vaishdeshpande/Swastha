@@ -115,7 +115,7 @@ async def test_escalation_from_scheduler_distress():
 
     with graph_mocks(
         llm_responses=[
-            intake_book(),
+            # voice_intake is SKIPPED (intent + patient_id already in state).
             {"action": "clarify", "reply": "Kya main madad kar sakta hoon?", "distress": True},
         ],
         patient=PATIENT_RAMESH,
@@ -149,7 +149,7 @@ async def test_human_handoff_preserves_prior_call_outcome():
 
     with graph_mocks(
         llm_responses=[
-            intake_book(),
+            # voice_intake is SKIPPED (intent + patient_id already in state).
             {"action": "clarify", "distress": True},
         ],
         patient=PATIENT_RAMESH,

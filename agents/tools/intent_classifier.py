@@ -10,6 +10,7 @@ import logging
 import os
 import re
 
+from langsmith import traceable
 from sarvamai import SarvamAI
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ def _clarify_key(top_two: list[str]) -> str:
     return pair if pair in _CLARIFY_TEMPLATES else "default"
 
 
+@traceable(run_type="llm", name="sarvam-30b:intent_fanout")
 async def run_intent_fanout(
     text: str,
     lang_code: str,
@@ -87,11 +89,18 @@ async def run_intent_fanout(
     scores: dict[str, float] = {k: 0.0 for k in _ALL_INTENTS}
 
     try:
-        response = client.chat.completions(
-            messages=[{"role": "user", "content": prompt}],
-            model="sarvam-30b",
-        )
-        content = response.choices[0].message.content or ""
+        import asyncio as _asyncio
+
+        def _sync_call() -> str:
+            r = client.chat.completions(
+                messages=[{"role": "user", "content": prompt}],
+                model="sarvam-30b",
+                temperature=0.0,
+                max_tokens=2048,
+            )
+            return r.choices[0].message.content or ""
+
+        content = await _asyncio.to_thread(_sync_call)
         for intent in _ALL_INTENTS:
             match = re.search(rf'"{intent}"\s*:\s*([0-9.]+)', content)
             if match:

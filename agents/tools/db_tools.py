@@ -507,6 +507,21 @@ async def dispatch_payment_link(bill_id: str, phone: str) -> None:
     logger.info("db: dispatch_payment_link sent SMS to phone=%s for bill_id=%s", phone, bill_id)
 
 
+async def has_pending_job(patient_id: str, job_type: str) -> bool:
+    """True if the patient already has a pending outbound job of this type.
+    Used by post_call to avoid scheduling duplicate confirmation/follow-up
+    jobs when it runs on multiple turns of the same call."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(DischargeFollowup.id).where(
+                DischargeFollowup.patient_id == patient_id,
+                DischargeFollowup.job_type == job_type,
+                DischargeFollowup.status == "pending",
+            ).limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
+
 async def schedule_outbound_job(patient_id: str, job_type: str, due_at: datetime) -> None:
     """Create a pending discharge_followups row so the cron picks it up
     at due_at. Used by the post-call subgraph to schedule confirmation

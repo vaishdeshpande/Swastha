@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 
+from langsmith import traceable
 from sarvamai import SarvamAI
 
 from agents.prompts.prescription import build_prescription_prompt
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 client = SarvamAI(api_subscription_key=os.environ["SARVAM_API_KEY"])
 
 
+@traceable(run_type="llm", name="sarvam-30b:prescription_answer")
 async def _answer_prescription_query(state: AgentState, prescription_context: dict | None) -> dict:
     """Calls sarvam-30b to answer the patient's question against the known
     prescription context only. Returns the parsed JSON decision dict.
@@ -33,8 +35,15 @@ async def _answer_prescription_query(state: AgentState, prescription_context: di
     system_prompt = build_prescription_prompt(state["lang_code"], prescription_context)
     messages = [{"role": "system", "content": system_prompt}, *state["messages"]]
 
-    response = client.chat.completions(messages=messages, model="sarvam-30b")
-    reply = response.choices[0].message.content or ""
+    import asyncio as _asyncio
+
+    def _sync_call() -> str:
+        r = client.chat.completions(
+            messages=messages, model="sarvam-30b", temperature=0.0, max_tokens=2048
+        )
+        return r.choices[0].message.content or ""
+
+    reply = await _asyncio.to_thread(_sync_call)
     parsed = extract_json(reply)
 
     if parsed is not None:
@@ -54,8 +63,14 @@ async def _answer_prescription_query(state: AgentState, prescription_context: di
             ),
         },
     ]
-    retry_response = client.chat.completions(messages=retry_messages, model="sarvam-30b")
-    retry_reply = retry_response.choices[0].message.content or ""
+
+    def _sync_retry() -> str:
+        r = client.chat.completions(
+            messages=retry_messages, model="sarvam-30b", temperature=0.0, max_tokens=2048
+        )
+        return r.choices[0].message.content or ""
+
+    retry_reply = await _asyncio.to_thread(_sync_retry)
     parsed = extract_json(retry_reply)
 
     if parsed is not None:

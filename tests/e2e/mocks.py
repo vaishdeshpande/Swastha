@@ -219,6 +219,14 @@ def llm_sequence(*responses: dict | str) -> MagicMock:
                 chunk.choices[0].delta.content = self._content
                 yield chunk
 
+            def __iter__(self):
+                # Sync streaming — the app iterates the stream inside
+                # asyncio.to_thread (see _sync_stream_extract).
+                chunk = MagicMock()
+                chunk.choices = [MagicMock()]
+                chunk.choices[0].delta.content = self._content
+                yield chunk
+
         side_effects.append(_StreamableResponse(content))
 
     mock_client.chat.completions.side_effect = side_effects

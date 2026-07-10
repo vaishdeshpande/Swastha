@@ -31,6 +31,8 @@ import os
 import re
 import uuid
 
+from langsmith import traceable
+from langsmith.run_helpers import get_current_run_tree
 from sarvamai import SarvamAI
 
 from agents.prompts.voice_intake import build_voice_intake_prompt
@@ -43,11 +45,20 @@ from agents.tools.translate_tools import translate_text
 
 logger = logging.getLogger(__name__)
 
-MAX_INTAKE_ATTEMPTS = 3
-
+# Shared sync client — reused across turns (same pattern as the scheduler and
+# prescription agents). Tests patch this attribute to mock the LLM.
 client = SarvamAI(api_subscription_key=os.environ["SARVAM_API_KEY"])
 
-_INTAKE_FIELDS = ("intent", "phone", "patient_name", "age", "department", "urgency")
+MAX_INTAKE_ATTEMPTS = 3
+
+# Scenario 4 fanout costs a full extra sarvam-30b round trip (~2-14s measured,
+# reasoning tokens included) to sometimes save one clarifying question — a net
+# latency loss on this model. Off by default; set INTENT_FANOUT_ENABLED=true
+# to re-enable. The normal clarification loop (prompt Example 11) covers the
+# ambiguous case either way.
+INTENT_FANOUT_ENABLED = os.environ.get("INTENT_FANOUT_ENABLED", "false").lower() == "true"
+
+_INTAKE_FIELDS = ("intent", "phone", "patient_name", "age", "department", "urgency", "chief_complaint")
 
 _DIGIT_WORD_MAP = {
     # English
@@ -128,6 +139,55 @@ def _try_extract_phone(partial: str) -> str | None:
 # Scenario 3 + 1 — streaming extraction with early phone lookup
 # ---------------------------------------------------------------------------
 
+@traceable(run_type="llm", name="sarvam-30b:intake_extract_stream")
+def _sync_stream_extract(full_messages: list[dict]) -> tuple[str, str | None]:
+    """Run synchronous SDK streaming in a thread.
+
+    Returns (accumulated_text, first_phone_found_mid_stream).
+    Running in a thread (via asyncio.to_thread) keeps the event loop free
+    for LiveKit audio heartbeats and data-channel messages during the ~1.9s
+    LLM call.
+    """
+    import time as _time
+    t_start = _time.perf_counter()
+    # temperature=0: structured extraction. max_tokens is a runaway guard only
+    # — sarvam-30b emits ~300-400 hidden reasoning tokens before content, so a
+    # tight cap truncates the answer to nothing (verified empirically).
+    stream = client.chat.completions(
+        messages=full_messages, model="sarvam-30b", stream=True,
+        temperature=0.0, max_tokens=2048,
+    )
+    accumulated = ""
+    early_phone: str | None = None
+    ttft_ms: float | None = None
+    for chunk in stream:
+        delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
+        if delta and ttft_ms is None:
+            ttft_ms = (_time.perf_counter() - t_start) * 1000
+        accumulated += delta
+        if early_phone is None and '"phone"' in accumulated:
+            phone = _try_extract_phone(accumulated)
+            if phone:
+                early_phone = phone
+    try:
+        run = get_current_run_tree()
+        if run is not None:
+            run.metadata["ttft_ms"] = round(ttft_ms) if ttft_ms is not None else None
+            run.metadata["model"] = "sarvam-30b"
+    except Exception:
+        pass  # tracing must never break the voice path
+    return accumulated, early_phone
+
+
+@traceable(run_type="llm", name="sarvam-30b:intake_extract_batch")
+def _sync_batch_extract(full_messages: list[dict]) -> str:
+    """Non-streaming fallback, also run in a thread."""
+    r = client.chat.completions(
+        messages=full_messages, model="sarvam-30b", temperature=0.0, max_tokens=2048
+    )
+    return r.choices[0].message.content or ""
+
+
 async def _extract_patient_info(
     messages: list[dict],
     lang_code: str,
@@ -136,9 +196,8 @@ async def _extract_patient_info(
 ) -> tuple[dict, asyncio.Task | None]:
     """Call sarvam-30b to extract intake fields.
 
-    Uses stream=True so that a phone number parsed mid-stream immediately fires
-    a background get_patient_record() task (Scenarios 1 + 3). Falls back to a
-    single non-streaming call if the SDK raises AttributeError or TypeError.
+    Both streaming and fallback paths run inside asyncio.to_thread so the
+    synchronous Sarvam SDK never blocks the LiveKit event loop.
 
     Returns:
         (parsed_dict, phone_lookup_task | None)
@@ -148,24 +207,14 @@ async def _extract_patient_info(
     phone_task: asyncio.Task | None = None
 
     try:
-        # ── Scenario 3: streaming path ──────────────────────────────────────
-        stream = client.chat.completions(
-            messages=full_messages,
-            model="sarvam-30b",
-            stream=True,
-        )
-        accumulated = ""
-        async for chunk in stream:
-            delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
-            accumulated += delta
+        # ── Scenario 3: streaming path (non-blocking via to_thread) ─────────
+        accumulated, early_phone = await asyncio.to_thread(_sync_stream_extract, full_messages)
 
-            # Scenario 1 + 3: fire DB lookup the moment phone is parseable
-            if phone_task is None and '"phone"' in accumulated:
-                phone = _try_extract_phone(accumulated)
-                if phone:
-                    logger.info("voice_intake: phone %s extracted mid-stream — firing background lookup", phone)
-                    phone_task = asyncio.create_task(get_patient_record(phone))
-                    _bg_tasks[session_id] = phone_task
+        # Scenario 1: fire background DB lookup right after stream completes
+        if early_phone and session_id not in _bg_tasks:
+            logger.info("voice_intake: phone %s found post-stream — firing background lookup", early_phone)
+            phone_task = asyncio.create_task(get_patient_record(early_phone))
+            _bg_tasks[session_id] = phone_task
 
         parsed = extract_json(accumulated)
         if parsed is None:
@@ -174,13 +223,9 @@ async def _extract_patient_info(
         return parsed, phone_task
 
     except (AttributeError, TypeError, NotImplementedError):
-        # ── Fallback: non-streaming path ─────────────────────────────────────
+        # ── Fallback: non-streaming, also non-blocking ────────────────────────
         logger.info("voice_intake: sarvam SDK does not support streaming — falling back to batch call")
-        response = client.chat.completions(
-            messages=full_messages,
-            model="sarvam-30b",
-        )
-        reply = response.choices[0].message.content
+        reply = await asyncio.to_thread(_sync_batch_extract, full_messages)
         if not reply:
             logger.warning("voice_intake: API returned empty/None content")
             return {"reply": None, "intent": None}, None
@@ -189,7 +234,6 @@ async def _extract_patient_info(
             logger.warning("voice_intake: batch reply not parseable JSON: %r", reply[:200])
             return {"reply": reply, "intent": None}, None
 
-        # Still fire the background lookup if phone is in the parsed result
         phone = parsed.get("phone")
         if phone and session_id not in _bg_tasks:
             phone_task = asyncio.create_task(get_patient_record(phone))
@@ -257,7 +301,7 @@ async def voice_intake_node(state: AgentState) -> AgentState:
 
     # ── Scenario 4: confidence-gated fanout on first ambiguous turn ──────────
     attempt_count = state.get("intake_attempt_count", 0)
-    if intent is None and attempt_count == 0 and state["messages"]:
+    if intent is None and attempt_count == 0 and INTENT_FANOUT_ENABLED and state["messages"]:
         last_utterance = next(
             (m["content"] for m in reversed(state["messages"]) if m["role"] == "user"),
             "",
@@ -340,10 +384,42 @@ async def voice_intake_node(state: AgentState) -> AgentState:
             "urgency": collected.get("urgency", "normal"),
         }
 
-    # Department gate REMOVED: if booking but no department, default to "general".
-    # Scheduler can refine based on patient history. Blocking on department was adding
-    # an extra turn — the combined phone+symptom ask covers both in one round-trip.
-    if intent == "book" and not collected.get("department"):
+    # Complaint gate: for booking, require chief_complaint before routing.
+    # Without this, a patient who gives name then phone in separate turns gets
+    # routed to the scheduler before ever stating their complaint.
+    if intent == "book" and not collected.get("department") and not collected.get("chief_complaint"):
+        if not collected.get("_complaint_turn"):
+            # First time we have phone but no complaint — ask for it explicitly.
+            collected["_complaint_turn"] = True
+            complaint_ask_hi = "Aur aapko kya takleef ho rahi hai? Isse main aapko sahi doctor se milwa sakti hoon."
+            try:
+                complaint_reply = (
+                    await translate_text(complaint_ask_hi, "hi-IN", lang_code)
+                    if lang_code not in ("hi-IN", "en-IN")
+                    else complaint_ask_hi
+                )
+            except Exception:
+                complaint_reply = complaint_ask_hi
+            # Replace any "booking" reply the LLM may have generated
+            if messages and messages[-1].get("role") == "assistant":
+                messages[-1]["content"] = complaint_reply
+            else:
+                messages.append({"role": "assistant", "content": complaint_reply})
+            logger.info("voice_intake: intent=book, phone present but no complaint — asking for complaint")
+            return {
+                **state,
+                "messages": messages,
+                "intake_collected": collected,
+                "intent": intent,
+                "department": state.get("department"),
+                "urgency": collected.get("urgency", "normal"),
+            }
+        else:
+            # Patient didn't give complaint even after being asked — default to general
+            collected["department"] = "general"
+            logger.info("voice_intake: intent=book, complaint not given after ask — defaulting to general")
+    elif intent == "book" and not collected.get("department"):
+        # department can be inferred from chief_complaint but LLM didn't set it — default
         collected["department"] = "general"
         logger.info("voice_intake: intent=book, no department inferred — defaulting to general")
 

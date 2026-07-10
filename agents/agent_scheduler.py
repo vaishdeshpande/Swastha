@@ -8,6 +8,7 @@ here, sharing the same tools.
 import logging
 import os
 
+from langsmith import traceable
 from sarvamai import SarvamAI
 
 from agents.prompts.scheduler import build_scheduler_prompt
@@ -27,7 +28,51 @@ logger = logging.getLogger(__name__)
 
 client = SarvamAI(api_subscription_key=os.environ["SARVAM_API_KEY"])
 
+# Signals that mean the first scheduler turn is NOT a plain "show me slots"
+# request, so the LLM must decide the action. Everything else on a first
+# scheduler turn is deterministic per the prompt's own Step 1 rule
+# ("NO slots offered yet → always check_slots with date=any"), and skipping
+# the LLM there saves one full sarvam-30b round trip (~2-14s measured).
+_CANCEL_RESCHEDULE_SIGNALS = [
+    "cancel", "कैंसिल", "रद्द", "reschedule", "postpone", "बदलना", "बदलायच",
+    "cancle", "टालना", "पुढे ढकल",
+]
+_DATE_SIGNALS = [
+    "kal", "कल", "aaj", "आज", "parso", "परसों", "उद्या", "परवा", "tarikh", "तारीख",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "सोमवार", "मंगलवार", "मंगळवार", "बुधवार", "गुरुवार", "गुरूवार", "शुक्रवार",
+    "शनिवार", "रविवार", "tomorrow", "today",
+]
 
+
+def _first_turn_fast_path(state: AgentState, entered_from: str) -> bool:
+    """True when the scheduler can skip the LLM because the decision is
+    deterministic per the prompt's own Step 1 rule (no slots offered yet →
+    check_slots with date=any).
+
+    Only fires when the scheduler was entered in the SAME graph pass as
+    voice_intake (entered_from=="voice_intake"): intake's LLM just read this
+    utterance and judged it a clean booking intent, so distress/cancel/clarify
+    have effectively been screened this turn. Any direct entry (patient
+    replying to a scheduler question, outbound flow) still gets the LLM."""
+    if entered_from != "voice_intake":
+        return False
+    if state.get("offered_slots"):
+        return False  # slot matching ("pehla wala", "do baje") needs the LLM
+    if state.get("appointment_id"):
+        return False  # existing appointment in play — cancel/reschedule needs the LLM
+    last_user = next(
+        (m["content"] for m in reversed(state.get("messages", [])) if m["role"] == "user"),
+        "",
+    ).lower()
+    if any(sig in last_user for sig in _CANCEL_RESCHEDULE_SIGNALS):
+        return False
+    if any(sig in last_user for sig in _DATE_SIGNALS):
+        return False  # patient named a date — LLM must extract it
+    return True
+
+
+@traceable(run_type="llm", name="sarvam-30b:scheduler_decision")
 async def _decide_scheduler_action(state: AgentState) -> dict:
     """Calls sarvam-30b to decide the next scheduling action from the
     conversation so far. Returns the parsed JSON decision dict."""
@@ -36,11 +81,20 @@ async def _decide_scheduler_action(state: AgentState) -> dict:
         department=state.get("department"),
         offered_slots=state.get("offered_slots"),
     )
-    response = client.chat.completions(
-        messages=[{"role": "system", "content": system_prompt}, *state["messages"]],
-        model="sarvam-30b",
-    )
-    reply = response.choices[0].message.content
+    messages = [{"role": "system", "content": system_prompt}, *state["messages"]]
+
+    def _sync_call() -> str:
+        # temperature=0: structured JSON decision, not creative text.
+        # max_tokens is a runaway guard only — sarvam-30b spends ~300-400
+        # hidden reasoning tokens before content, so a tight cap would
+        # truncate the answer to nothing (verified empirically).
+        r = client.chat.completions(
+            messages=messages, model="sarvam-30b", temperature=0.0, max_tokens=2048
+        )
+        return r.choices[0].message.content or ""
+
+    import asyncio as _asyncio
+    reply = await _asyncio.to_thread(_sync_call)
     parsed = extract_json(reply)
     if parsed is None:
         logger.warning("scheduler: LLM reply wasn't parseable JSON, treating as clarification: %r", reply)
@@ -54,10 +108,17 @@ def _format_slot_options(slots: list[dict]) -> str:
 
 
 async def scheduler_node(state: AgentState) -> AgentState:
+    entered_from = state.get("current_agent", "")  # who ran before us in this pass
     state["current_agent"] = "scheduler"
     logger.info("scheduler: start (call_id=%s, department=%s)", state.get("call_id"), state.get("department"))
 
-    decision = await _decide_scheduler_action(state)
+    if _first_turn_fast_path(state, entered_from):
+        # Deterministic per prompt Step 1 — no LLM call needed.
+        logger.info("scheduler: first-turn fast path — check_slots(date=any) without LLM")
+        decision = {"action": "check_slots", "date": "any", "chosen_slot_id": None,
+                    "cancel_appointment_id": None, "distress": False, "reply": None}
+    else:
+        decision = await _decide_scheduler_action(state)
     lang_code = state["lang_code"]
     messages = [*state["messages"]]
 
@@ -111,6 +172,10 @@ async def scheduler_node(state: AgentState) -> AgentState:
     if action == "confirm_booking":
         slot_id = decision.get("chosen_slot_id")
         logger.info("scheduler: booking slot_id=%s for patient_id=%s", slot_id, state.get("patient_id"))
+        # Capture slot details before offered_slots is cleared — livekit_agent
+        # uses this for the booking_confirmed UI card (doctor name, time, date).
+        offered = state.get("offered_slots") or []
+        matched_slot = next((s for s in offered if s.get("slot_id") == slot_id), {})
         confirmation = await book_slot(state["patient_id"], slot_id)
         logger.info("scheduler: booked appointment_id=%s", confirmation["appointment_id"])
         reply_en = (
@@ -124,6 +189,12 @@ async def scheduler_node(state: AgentState) -> AgentState:
             "messages": messages,
             "offered_slots": None,
             "appointment_id": confirmation["appointment_id"],
+            "booked_slot_details": {
+                "doctor_name": matched_slot.get("doctor_name") or confirmation.get("doctor_name", ""),
+                "department": state.get("department", "general"),
+                "date": matched_slot.get("date") or confirmation.get("date", ""),
+                "time": matched_slot.get("time") or confirmation.get("time", ""),
+            },
         }
 
     if action == "cancel":

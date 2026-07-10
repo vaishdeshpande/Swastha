@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 
+from langsmith import traceable
 from sarvamai import SarvamAI
 
 logger = logging.getLogger(__name__)
@@ -13,6 +14,7 @@ logger = logging.getLogger(__name__)
 client = SarvamAI(api_subscription_key=os.environ["SARVAM_API_KEY"])
 
 
+@traceable(run_type="tool", name="sarvam-mayura:translate")
 async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
     """Translate text using Sarvam Mayura v1.
     Primary use: doctor notes (en-IN) → patient language (hi-IN, mr-IN)."""
@@ -33,6 +35,7 @@ async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
     return result
 
 
+@traceable(run_type="tool", name="sarvam:identify_language")
 async def sarvam_identify_language(text: str) -> str:
     """Fallback language detection when STT confidence is low.
     Uses asyncio.to_thread so the blocking HTTP call doesn't stall the LiveKit

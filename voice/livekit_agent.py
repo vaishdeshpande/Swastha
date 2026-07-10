@@ -95,6 +95,7 @@ def _initial_state(call_id: str) -> AgentState:
         "call_start_time": datetime.now(timezone.utc).isoformat(),
         "offered_slots": None,
         "appointment_id": None,
+        "booked_slot_details": None,
         "job_type": None,
         "call_connected": True,
         # Scenario 1–4 speculative fields
@@ -251,18 +252,19 @@ class HospitalReceptionistAgent(Agent):
                 "agent": self.state.get("current_agent"),
             })
 
-        # booking_confirmed — fire once when appointment_id first appears in state
+        # booking_confirmed — fire once when appointment_id first appears in state.
+        # Use booked_slot_details (set by scheduler before clearing offered_slots)
+        # so doctor name/time/date are always available for the UI card.
         if self.state.get("appointment_id") and not self._booking_confirmed_sent:
             self._booking_confirmed_sent = True
-            offered = self.state.get("offered_slots") or []
-            booked = next((s for s in offered if s.get("slot_id") == self.state["appointment_id"]), {})
+            details = self.state.get("booked_slot_details") or {}
             await self._publish({
                 "type": "booking_confirmed",
                 "details": {
-                    "doctor": booked.get("doctor_name", self.state.get("department", "")),
-                    "department": self.state.get("department"),
-                    "date": booked.get("date"),
-                    "time": booked.get("time"),
+                    "doctor": details.get("doctor_name") or self.state.get("department", ""),
+                    "department": details.get("department") or self.state.get("department"),
+                    "date": details.get("date"),
+                    "time": details.get("time"),
                 },
             })
 
@@ -359,15 +361,20 @@ class HospitalReceptionistAgent(Agent):
             import os as _os
             from sarvamai import SarvamAI as _SarvamAI
             _client = _SarvamAI(api_subscription_key=_os.environ["SARVAM_API_KEY"])
-            resp = await asyncio.to_thread(
-                lambda: _client.chat.completions(
-                    messages=[{
-                        "role": "user",
-                        "content": f"Summarise this in under 40 words in {lang_code}: {reply}",
-                    }],
-                    model="sarvam-30b",
+            with ls_trace(
+                "sarvam-30b:tts_cap_summarise",
+                run_type="llm",
+                inputs={"reply_chars": len(reply), "lang_code": lang_code},
+            ):
+                resp = await asyncio.to_thread(
+                    lambda: _client.chat.completions(
+                        messages=[{
+                            "role": "user",
+                            "content": f"Summarise this in under 40 words in {lang_code}: {reply}",
+                        }],
+                        model="sarvam-30b",
+                    )
                 )
-            )
             summarised = resp.choices[0].message.content.strip()
             logger.debug("GUARDRAIL[tts_cap]: original=%d chars, summarised=%d chars", len(reply), len(summarised))
             return summarised

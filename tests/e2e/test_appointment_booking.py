@@ -81,7 +81,8 @@ async def test_full_hindi_appointment_booking_two_turns():
     # ── Turn 2: Patient picks first slot ──────────────────────────────────
     with graph_mocks(
         llm_responses=[
-            intake_book(),             # voice_intake re-runs; sees full history, re-extracts intent
+            # voice_intake is SKIPPED on this turn (route_after_language: intent
+            # + patient_id already resolved) — scheduler LLM is the only call.
             sched_confirm("slot-g1"), # scheduler: patient said yes to slot-g1
         ],
         patient=PATIENT_RAMESH,
@@ -257,7 +258,7 @@ async def test_appointment_reschedule():
 
     with graph_mocks(
         llm_responses=[
-            intake_book(),      # voice_intake re-extracts from history
+            # voice_intake is SKIPPED (intent + patient_id already in state).
             {"action": "reschedule", "cancel_appointment_id": "old-appt-uuid", "distress": False},
         ],
         patient=PATIENT_RAMESH,
@@ -321,7 +322,7 @@ async def test_distress_mid_scheduling_triggers_escalation():
 
     with graph_mocks(
         llm_responses=[
-            intake_book(),
+            # voice_intake is SKIPPED (intent + patient_id already in state).
             {"action": "clarify", "reply": "Kya main madad kar sakta hoon?", "distress": True},
         ],
         patient=PATIENT_RAMESH,
