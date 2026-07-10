@@ -394,6 +394,8 @@ async def get_due_outbound_jobs() -> list[dict]:
         for followup, patient in result.all():
             jobs.append(
                 {
+                    "job_id": str(followup.id),  # needed to mark the job done — without
+                                                 # it jobs stay pending and retry forever
                     "patient_id": str(patient.id),
                     "lang_code": patient.lang_pref,
                     "tts_voice": "priya" if patient.lang_pref == "hi-IN" else "kavya",
@@ -402,6 +404,38 @@ async def get_due_outbound_jobs() -> list[dict]:
             )
         logger.info("db: get_due_outbound_jobs -> %d job(s) due", len(jobs))
         return jobs
+
+
+async def complete_outbound_job(job_id: str, status: str = "completed") -> None:
+    """Close an outbound job so the cron stops re-processing it.
+    status: 'completed' on success, 'failed' on a permanent error."""
+    async with async_session() as session:
+        job = await session.get(DischargeFollowup, job_id)
+        if not job:
+            logger.warning("db: complete_outbound_job — job_id=%s not found", job_id)
+            return
+        job.status = status
+        job.completed_at = datetime.utcnow()
+        await session.commit()
+        logger.info("db: outbound job %s marked %s", job_id, status)
+
+
+async def get_latest_booked_appointment(patient_id: str) -> str | None:
+    """Most recent booked (not yet confirmed) appointment for a patient.
+    Used by the outbound confirmation call — the confirmation job row doesn't
+    store an appointment reference, so it's resolved at call time."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(Appointment.id)
+            .where(
+                Appointment.patient_id == patient_id,
+                Appointment.status == "booked",
+            )
+            .order_by(Appointment.booked_at.desc())
+            .limit(1)
+        )
+        appt_id = result.scalar_one_or_none()
+        return str(appt_id) if appt_id else None
 
 
 # ---------------------------------------------------------------------------

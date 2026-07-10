@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
 from agents.graph import outbound_graph
-from agents.tools.db_tools import get_due_outbound_jobs
+from agents.tools.db_tools import complete_outbound_job, get_due_outbound_jobs
 from api.database import init_database
 from api.redis_client import init_redis
 
@@ -27,8 +27,14 @@ async def run_outbound_jobs():
     """Query due_followups and pending_confirmations from Supabase.
     For each due job, invoke the outbound LangGraph with the right job_type.
     One job failing (bad data, transient API error) must not block the
-    rest of the batch — the retry loop lives in the underlying job status,
-    not here."""
+    rest of the batch.
+
+    Job lifecycle: confirmation and rx_reminder jobs are one-shot — marked
+    'completed' after a successful graph pass so the cron never re-processes
+    them (previously they stayed pending and retried every 30 minutes,
+    forever). A job that raises is marked 'failed' — kept visible in the DB
+    for manual retry, but it stops crash-looping and burning LLM calls.
+    followup jobs mark themselves via log_outcome inside the graph."""
     due_jobs = await get_due_outbound_jobs()
     for job in due_jobs:
         initial_state = {
@@ -44,6 +50,10 @@ async def run_outbound_jobs():
             await outbound_graph.ainvoke(initial_state)
         except Exception:
             logger.exception("Outbound job failed for patient %s (job_type=%s)", job["patient_id"], job["job_type"])
+            await complete_outbound_job(job["job_id"], status="failed")
+            continue
+        if job["job_type"] in ("confirmation", "rx_reminder"):
+            await complete_outbound_job(job["job_id"], status="completed")
 
 
 @asynccontextmanager

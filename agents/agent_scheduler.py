@@ -245,6 +245,22 @@ async def scheduler_outbound_node(state: AgentState) -> AgentState:
     lang_code = state["lang_code"]
     logger.info("scheduler_outbound: start (call_id=%s, appointment_id=%s)", state.get("call_id"), state.get("appointment_id"))
 
+    # The confirmation job row carries no appointment reference — resolve the
+    # patient's latest booked appointment here. If there's nothing to confirm
+    # (booking was cancelled, or the job is a stale duplicate), close the job
+    # WITHOUT spending an LLM call — this path used to crash with KeyError and
+    # retry every 30 minutes forever.
+    appointment_id = state.get("appointment_id")
+    if not appointment_id:
+        from agents.tools.db_tools import get_latest_booked_appointment
+        appointment_id = await get_latest_booked_appointment(state["patient_id"])
+    if not appointment_id:
+        logger.warning(
+            "scheduler_outbound: no booked appointment for patient_id=%s — closing job without call",
+            state.get("patient_id"),
+        )
+        return {**state, "call_outcome": {"confirmed": False, "reason": "no booked appointment on file"}}
+
     script_en = "This is a reminder call about your upcoming appointment tomorrow. Will you be attending?"
     script = await translate_text(script_en, source_lang="en-IN", target_lang=lang_code)
     messages = [*state["messages"], {"role": "assistant", "content": script}]
@@ -255,8 +271,8 @@ async def scheduler_outbound_node(state: AgentState) -> AgentState:
         logger.info("scheduler_outbound: patient declined/rescheduled, handing off to inbound scheduler flow")
         return await scheduler_node({**state, "messages": messages})
 
-    logger.info("scheduler_outbound: confirming appointment_id=%s", state["appointment_id"])
-    await confirm_appointment(state["appointment_id"])
+    logger.info("scheduler_outbound: confirming appointment_id=%s", appointment_id)
+    await confirm_appointment(appointment_id)
     closing = await translate_text(
         "Thank you, your appointment is confirmed. See you then.", source_lang="en-IN", target_lang=lang_code
     )
