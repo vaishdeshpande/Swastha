@@ -24,18 +24,47 @@ client = SarvamAI(api_subscription_key=os.environ["SARVAM_API_KEY"])
 
 async def _answer_prescription_query(state: AgentState, prescription_context: dict | None) -> dict:
     """Calls sarvam-30b to answer the patient's question against the known
-    prescription context only. Returns the parsed JSON decision dict."""
+    prescription context only. Returns the parsed JSON decision dict.
+
+    If the LLM returns unparseable output on the first call, retries once with
+    an explicit instruction to return only valid JSON. Raw LLM text is NEVER
+    passed to the patient — it would expose internal JSON structure as speech.
+    """
     system_prompt = build_prescription_prompt(state["lang_code"], prescription_context)
-    response = client.chat.completions(
-        messages=[{"role": "system", "content": system_prompt}, *state["messages"]],
-        model="sarvam-30b",
-    )
-    reply = response.choices[0].message.content
+    messages = [{"role": "system", "content": system_prompt}, *state["messages"]]
+
+    response = client.chat.completions(messages=messages, model="sarvam-30b")
+    reply = response.choices[0].message.content or ""
     parsed = extract_json(reply)
-    if parsed is None:
-        logger.warning("prescription: LLM reply wasn't parseable JSON, using raw reply: %r", reply)
-        return {"reply": reply, "escalate": False}
-    return parsed
+
+    if parsed is not None:
+        return parsed
+
+    # First attempt returned unparseable output — retry with explicit JSON instruction
+    logger.warning("prescription: LLM reply not parseable JSON (attempt 1), retrying: %r", reply[:200])
+    retry_messages = [
+        *messages,
+        {"role": "assistant", "content": reply},
+        {
+            "role": "user",
+            "content": (
+                "Your previous response was not valid JSON. "
+                "Reply with ONLY a JSON object matching this schema exactly: "
+                '{"reply": "<spoken text in patient language>", "escalate": false}'
+            ),
+        },
+    ]
+    retry_response = client.chat.completions(messages=retry_messages, model="sarvam-30b")
+    retry_reply = retry_response.choices[0].message.content or ""
+    parsed = extract_json(retry_reply)
+
+    if parsed is not None:
+        logger.info("prescription: retry succeeded")
+        return parsed
+
+    # Both attempts failed — escalate rather than speak raw JSON to the patient
+    logger.error("prescription: LLM reply still not parseable after retry, escalating: %r", retry_reply[:200])
+    return {"reply": None, "escalate": True}
 
 
 async def prescription_node(state: AgentState) -> AgentState:
@@ -73,20 +102,31 @@ async def prescription_node(state: AgentState) -> AgentState:
     }
 
     decision = await _answer_prescription_query(state, prescription_context)
-    reply = decision.get("reply", "")
-    messages.append({"role": "assistant", "content": reply})
-
-    await log_query(state["patient_id"], query=state["messages"][-1]["content"], response=reply)
-    logger.info("prescription: query logged for patient_id=%s", state.get("patient_id"))
+    reply = decision.get("reply") or ""
 
     if decision.get("escalate"):
-        logger.warning("prescription: question beyond scope — escalating (patient_id=%s)", state.get("patient_id"))
+        # Escalation path — speak a handoff message if the LLM didn't provide one
+        if not reply:
+            reply = await translate_text(
+                "I need to connect you to a staff member for this query.",
+                source_lang="en-IN",
+                target_lang=lang_code,
+            )
+        messages.append({"role": "assistant", "content": reply})
+        logger.warning("prescription: escalating (patient_id=%s)", state.get("patient_id"))
         return {
             **state,
             "messages": messages,
             "escalation_required": True,
             "escalation_reason": "Prescription question beyond scope — patient referred to doctor",
         }
+
+    if reply:
+        messages.append({"role": "assistant", "content": reply})
+
+    last_user = state["messages"][-1]["content"] if state["messages"] else ""
+    await log_query(state["patient_id"], query=last_user, response=reply)
+    logger.info("prescription: query logged for patient_id=%s", state.get("patient_id"))
 
     logger.info("prescription: answered successfully (call_id=%s)", state.get("call_id"))
     return {**state, "messages": messages}

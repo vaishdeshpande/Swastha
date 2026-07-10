@@ -34,11 +34,13 @@ os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://user:pass@localhost/
 
 def make_state(**overrides) -> dict:
     base = {
+        "session_id": "test-session-001",
         "lang_code": "hi-IN",
         "tts_voice": "priya",
         "tts_model": "bulbul:v3",
         "detected_language": None,
         "detection_confidence": None,
+        "lang_mismatch_count": 0,
         "patient_id": "patient-uuid-001",
         "patient_name": "Ramesh Kumar",
         "is_new_patient": False,
@@ -58,6 +60,12 @@ def make_state(**overrides) -> dict:
         "appointment_id": None,
         "job_type": None,
         "call_connected": True,
+        "optimistic_patient_id": None,
+        "prefetched_slots": None,
+        "intent_classifier_scores": None,
+        "lab_reports_dispatched": None,
+        "bill_amount_due": None,
+        "bill_sms_sent": None,
     }
     base.update(overrides)
     return base

@@ -13,26 +13,43 @@ from agents.graph import route_after_intake, check_escalation, route_outbound_jo
 
 
 class TestRouteAfterIntake:
-    def test_intent_book_routes_to_scheduler(self):
-        state = make_state(intent="book")
+    def test_intent_book_with_patient_routes_to_scheduler(self):
+        state = make_state(intent="book", patient_id="patient-uuid")
         assert route_after_intake(state) == "scheduler"
 
-    def test_intent_prescription_routes_to_prescription(self):
-        state = make_state(intent="prescription")
+    def test_intent_book_without_patient_awaits_phone(self):
+        # Intent known but phone not yet collected — wait for next turn
+        state = make_state(intent="book", patient_id=None)
+        assert route_after_intake(state) == "await_input"
+
+    def test_intent_prescription_with_patient_routes_to_prescription(self):
+        state = make_state(intent="prescription", patient_id="patient-uuid")
         assert route_after_intake(state) == "prescription"
 
-    def test_intent_none_loops_back_to_voice_intake(self):
-        state = make_state(intent=None)
-        assert route_after_intake(state) == "voice_intake"
+    def test_intent_none_awaits_input(self):
+        state = make_state(intent=None, intake_attempt_count=0)
+        assert route_after_intake(state) == "await_input"
 
-    def test_intent_followup_falls_back_to_voice_intake(self):
-        # "followup" is not a handled inbound intent — treated as unclear
-        state = make_state(intent="followup")
-        assert route_after_intake(state) == "voice_intake"
+    def test_intent_none_at_max_attempts_routes_to_human_handoff(self):
+        # After MAX_INTAKE_ATTEMPTS unclear rounds, graph stops looping and escalates
+        from agents.graph import MAX_INTAKE_ATTEMPTS
+        state = make_state(intent=None, intake_attempt_count=MAX_INTAKE_ATTEMPTS)
+        assert route_after_intake(state) == "human_handoff"
 
-    def test_intent_query_falls_back_to_voice_intake(self):
-        state = make_state(intent="query")
-        assert route_after_intake(state) == "voice_intake"
+    def test_intent_followup_awaits_input(self):
+        # "followup" is outbound-only — inbound stays in clarification loop
+        state = make_state(intent="followup", patient_id="patient-uuid")
+        assert route_after_intake(state) == "await_input"
+
+    def test_intent_query_awaits_input(self):
+        # "query" is too generic — clarify further before routing
+        state = make_state(intent="query", patient_id="patient-uuid")
+        assert route_after_intake(state) == "await_input"
+
+    def test_escalation_required_always_wins(self):
+        # escalation_required=True overrides even a valid intent
+        state = make_state(intent="book", patient_id="patient-uuid", escalation_required=True)
+        assert route_after_intake(state) == "human_handoff"
 
 
 class TestCheckEscalation:
@@ -96,3 +113,51 @@ class TestCheckRisk:
     def test_missing_risk_field_defaults_to_end(self):
         state = make_state(call_outcome={"status": "completed"})
         assert check_risk(state) == "end"
+
+
+class TestRouteAfterIntakeLabBilling:
+    """Routing tests for the two new intents added in the agents/CLAUDE.md update."""
+
+    def test_intent_lab_with_patient_routes_to_lab_status(self):
+        state = make_state(intent="lab", patient_id="patient-uuid")
+        assert route_after_intake(state) == "lab_status"
+
+    def test_intent_billing_with_patient_routes_to_billing(self):
+        state = make_state(intent="billing", patient_id="patient-uuid")
+        assert route_after_intake(state) == "billing"
+
+    def test_intent_lab_without_patient_awaits_phone(self):
+        state = make_state(intent="lab", patient_id=None)
+        assert route_after_intake(state) == "await_input"
+
+    def test_intent_billing_without_patient_awaits_phone(self):
+        state = make_state(intent="billing", patient_id=None)
+        assert route_after_intake(state) == "await_input"
+
+    def test_escalation_overrides_lab_intent(self):
+        state = make_state(intent="lab", escalation_required=True)
+        assert route_after_intake(state) == "human_handoff"
+
+    def test_escalation_overrides_billing_intent(self):
+        state = make_state(intent="billing", escalation_required=True)
+        assert route_after_intake(state) == "human_handoff"
+
+    def test_await_input_returned_for_unclear_intent(self):
+        """intent=None with attempts remaining → graph pauses and waits."""
+        state = make_state(intent=None, intake_attempt_count=0)
+        assert route_after_intake(state) == "await_input"
+
+    def test_await_input_returned_for_followup_intent(self):
+        """'followup' is outbound-only inbound — stays in clarification loop."""
+        state = make_state(intent="followup", patient_id="patient-uuid")
+        assert route_after_intake(state) == "await_input"
+
+    def test_await_input_returned_for_query_intent(self):
+        state = make_state(intent="query", patient_id="patient-uuid")
+        assert route_after_intake(state) == "await_input"
+
+    def test_max_attempts_with_no_intent_routes_to_human_handoff(self):
+        """Exhausted intake rounds without resolving intent → escalate."""
+        from agents.graph import MAX_INTAKE_ATTEMPTS
+        state = make_state(intent=None, patient_id="patient-uuid", intake_attempt_count=MAX_INTAKE_ATTEMPTS)
+        assert route_after_intake(state) == "human_handoff"

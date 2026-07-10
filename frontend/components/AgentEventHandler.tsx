@@ -2,7 +2,7 @@
 
 import { useDataChannel } from "@livekit/components-react";
 import { createLogger } from "@/lib/logger";
-import { AgentEvent, BookingDetails, CallStatus, TranscriptMessage } from "@/lib/types";
+import { AgentEvent, BillDetails, BookingDetails, CallStatus, LabReport, TranscriptMessage } from "@/lib/types";
 
 const log = createLogger("component/AgentEventHandler");
 
@@ -11,6 +11,8 @@ interface AgentEventHandlerProps {
   onAgentChange: (agent: string) => void;
   onStatusChange: (status: CallStatus) => void;
   onBookingConfirmed: (details: BookingDetails) => void;
+  onLabResult?: (reports: LabReport[]) => void;
+  onBillRead?: (details: BillDetails) => void;
 }
 
 export default function AgentEventHandler({
@@ -18,6 +20,8 @@ export default function AgentEventHandler({
   onAgentChange,
   onStatusChange,
   onBookingConfirmed,
+  onLabResult,
+  onBillRead,
 }: AgentEventHandlerProps) {
   useDataChannel("agent-events", (msg) => {
     let event: AgentEvent;
@@ -48,6 +52,12 @@ export default function AgentEventHandler({
         break;
       case "booking_confirmed":
         onBookingConfirmed(event.details);
+        break;
+      case "lab_result_ready":
+        onLabResult?.(event.reports);
+        break;
+      case "bill_read":
+        onBillRead?.({ amount: event.amount, sms_sent: event.sms_sent });
         break;
       case "call_dropped":
         log.warn("Agent reported call dropped", { reason: event.reason });

@@ -39,6 +39,8 @@ async def test_check_slots_action_returns_slot_list():
     with (
         patch("agents.agent_scheduler.client", mock_client),
         patch("agents.agent_scheduler.check_available_slots", AsyncMock(return_value=OPEN_SLOTS)),
+        patch("agents.agent_scheduler.get_cached_slots", AsyncMock(return_value=None)),
+        patch("agents.tools.redis_tools.cache_slots", AsyncMock()),
         patch("agents.agent_scheduler.translate_text", AsyncMock(side_effect=lambda t, **_: t)),
     ):
         from agents.agent_scheduler import scheduler_node
@@ -60,6 +62,8 @@ async def test_check_slots_empty_falls_back_to_next_available():
         patch("agents.agent_scheduler.client", mock_client),
         patch("agents.agent_scheduler.check_available_slots", AsyncMock(return_value=[])),
         patch("agents.agent_scheduler.get_next_available", AsyncMock(return_value=OPEN_SLOTS)) as mock_next,
+        patch("agents.agent_scheduler.get_cached_slots", AsyncMock(return_value=None)),
+        patch("agents.tools.redis_tools.cache_slots", AsyncMock()),
         patch("agents.agent_scheduler.translate_text", AsyncMock(side_effect=lambda t, **_: t)),
     ):
         from agents.agent_scheduler import scheduler_node

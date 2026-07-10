@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()  # MUST run before any module-level os.environ[...] reads below
 
 from api.database import async_session, init_database
-from api.models import Appointment, Doctor, DischargeFollowup, Patient, Prescription
+from api.models import Appointment, Bill, Doctor, DischargeFollowup, LabReport, Patient, Prescription
 
 DOCTORS = [
     {"name": "Dr. Priya Sharma", "department": "general", "qualification": "MBBS, MD", "available_days": ["monday", "wednesday", "friday"]},
@@ -130,9 +130,63 @@ async def seed():
         ]
         session.add_all(discharge_followups)
 
+        # 3 lab reports for Agent 6 testing
+        lab_reports = [
+            # Ready — read out in demo (Ramesh Kumar, hi-IN)
+            LabReport(
+                patient_id=patients[0].id,
+                test_name="Complete Blood Count (CBC)",
+                status="ready",
+                ready_at=datetime.utcnow() - timedelta(hours=10),
+                result_summary_en="Hemoglobin is slightly low at 10.8 g/dL. All other values are within normal range. Please follow up with your doctor.",
+            ),
+            # Pending — shows "still processing" (Arun Patil, mr-IN)
+            LabReport(
+                patient_id=patients[2].id,
+                test_name="Lipid Panel",
+                status="pending",
+                ready_at=None,
+                result_summary_en=None,
+            ),
+            # Dispatched — must NOT appear in demo (Ramesh Kumar)
+            LabReport(
+                patient_id=patients[0].id,
+                test_name="Blood Glucose",
+                status="dispatched",
+                ready_at=datetime.utcnow() - timedelta(days=2),
+                result_summary_en="Blood glucose is 98 mg/dL, within normal fasting range.",
+            ),
+        ]
+        session.add_all(lab_reports)
+
+        # 2 bills for Agent 7 testing
+        bills = [
+            # Unpaid — demo reads amount + dispatches link (Sunita Devi, hi-IN)
+            Bill(
+                patient_id=patients[1].id,
+                amount_due=3200.00,
+                status="unpaid",
+                items_json=[
+                    {"desc": "OPD Consultation", "qty": 1, "amount": 500},
+                    {"desc": "Blood CBC Test", "qty": 1, "amount": 700},
+                    {"desc": "Medicines", "qty": 1, "amount": 2000},
+                ],
+                payment_link="upi://pay?pa=hospital@okaxis&am=3200&cu=INR&tn=HospitalBill",
+            ),
+            # Paid — must NOT appear in demo (Priya Marathe)
+            Bill(
+                patient_id=patients[3].id,
+                amount_due=1500.00,
+                status="paid",
+                items_json=[{"desc": "OPD Consultation", "qty": 1, "amount": 1500}],
+                payment_link=None,
+            ),
+        ]
+        session.add_all(bills)
+
         await session.commit()
 
-    print("Seed complete: 5 doctors, 10 patients, 20 slots, 3 prescriptions, 2 discharge followups")
+    print("Seed complete: 5 doctors, 10 patients, 20 slots, 3 prescriptions, 2 discharge followups, 3 lab reports, 2 bills")
 
 
 if __name__ == "__main__":

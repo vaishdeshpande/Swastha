@@ -103,7 +103,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from api.routes import livekit, appointments, prescriptions, followup, analytics, doctors
+from api.routes import livekit, appointments, prescriptions, followup, analytics, doctors, lab, billing
 
 app.include_router(livekit.router, prefix="/api", tags=["Voice / LiveKit"])
 app.include_router(appointments.router, prefix="/api", tags=["Appointments"])
@@ -111,6 +111,8 @@ app.include_router(prescriptions.router, prefix="/api", tags=["Prescriptions"])
 app.include_router(followup.router, prefix="/api", tags=["Follow-up"])
 app.include_router(analytics.router, prefix="/api", tags=["Analytics"])
 app.include_router(doctors.router, prefix="/api", tags=["Doctors"])
+app.include_router(lab.router, prefix="/api", tags=["Lab Reports"])
+app.include_router(billing.router, prefix="/api", tags=["Billing"])
 
 
 @app.get("/health", tags=["Health"], summary="Health check")

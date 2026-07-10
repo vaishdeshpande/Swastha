@@ -8,6 +8,12 @@ interface Props {
   onReconnect?: () => void;
 }
 
+const LANG_LABEL: Record<string, string> = {
+  "hi-IN": "Hindi",
+  "mr-IN": "Marathi",
+  auto: "Auto",
+};
+
 function formatDuration(sec: number): string {
   const m = Math.floor(sec / 60);
   const s = Math.round(sec % 60);
@@ -17,18 +23,38 @@ function formatDuration(sec: number): string {
 export default function CallSummaryCard({ summary, onStartNewCall, onReconnect }: Props) {
   if (summary.dropped) {
     return (
-      <div className="neo-card flex flex-col items-center gap-4 text-center">
-        <p className="neo-text" style={{ color: "var(--neo-red)", fontWeight: 600 }}>
-          ⚠ Call dropped unexpectedly
+      <div style={{ width: "100%", display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+        <div style={{ width: 14, height: 14, borderRadius: "50%", background: "var(--neo-red)" }} />
+        <p style={{ fontSize: 13, fontWeight: 700, color: "var(--neo-red)" }}>
+          Call dropped unexpectedly
         </p>
-        {summary.dropReason && <p className="neo-text-muted">{summary.dropReason}</p>}
-        <div className="flex gap-3">
+        <div style={{ display: "flex", gap: 10, width: "100%", marginTop: 8 }}>
           {onReconnect && (
-            <button type="button" className="neo-btn px-4 py-2 text-sm" style={{ color: "var(--neo-green)" }} onClick={onReconnect}>
+            <button
+              type="button"
+              onClick={onReconnect}
+              style={{
+                flex: 1, padding: "10px", borderRadius: 12, border: "none",
+                background: "var(--neo-green)", color: "#ffffff",
+                fontSize: 12, fontWeight: 700, cursor: "pointer",
+                boxShadow: "4px 4px 10px var(--neo-shadow-dark), -4px -4px 10px var(--neo-shadow-light)",
+                fontFamily: "inherit",
+              }}
+            >
               Reconnect
             </button>
           )}
-          <button type="button" className="neo-btn px-4 py-2 text-sm" style={{ color: "var(--neo-red)" }} onClick={onStartNewCall}>
+          <button
+            type="button"
+            onClick={onStartNewCall}
+            style={{
+              flex: 1, padding: "10px", borderRadius: 12, border: "none",
+              background: "var(--neo-bg)", color: "var(--neo-text)",
+              fontSize: 12, fontWeight: 700, cursor: "pointer",
+              boxShadow: "4px 4px 10px var(--neo-shadow-dark), -4px -4px 10px var(--neo-shadow-light)",
+              fontFamily: "inherit",
+            }}
+          >
             End Session
           </button>
         </div>
@@ -37,18 +63,18 @@ export default function CallSummaryCard({ summary, onStartNewCall, onReconnect }
   }
 
   return (
-    <div className="neo-card flex flex-col gap-3">
-      <p className="neo-label" style={{ marginBottom: 0 }}>
+    <div style={{ width: "100%" }}>
+      <p style={{ fontSize: 14, fontWeight: 800, color: "var(--neo-text)", marginBottom: 14, textAlign: "left" }}>
         Call Summary
       </p>
-      <div className="neo-booking-grid">
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, textAlign: "left" }}>
         <div className="neo-booking-cell">
           <div className="neo-booking-cell-label">Duration</div>
           <div className="neo-booking-cell-val">{formatDuration(summary.durationSec)}</div>
         </div>
         <div className="neo-booking-cell">
           <div className="neo-booking-cell-label">Language</div>
-          <div className="neo-booking-cell-val">{summary.lang}</div>
+          <div className="neo-booking-cell-val">{LANG_LABEL[summary.lang] ?? summary.lang}</div>
         </div>
         {summary.intent && (
           <div className="neo-booking-cell">
@@ -61,7 +87,18 @@ export default function CallSummaryCard({ summary, onStartNewCall, onReconnect }
           <div className="neo-booking-cell-val">{summary.agentsUsed.join(" → ") || "—"}</div>
         </div>
       </div>
-      <button type="button" className="neo-btn px-4 py-2 text-sm self-start" onClick={onStartNewCall}>
+      <button
+        type="button"
+        onClick={onStartNewCall}
+        style={{
+          width: "100%", marginTop: 16, padding: "12px",
+          borderRadius: 14, border: "none",
+          background: "var(--neo-bg)",
+          boxShadow: "4px 4px 10px var(--neo-shadow-dark), -4px -4px 10px var(--neo-shadow-light)",
+          fontSize: 13, fontWeight: 700, color: "var(--neo-accent)",
+          cursor: "pointer", fontFamily: "inherit",
+        }}
+      >
         Start New Call
       </button>
     </div>

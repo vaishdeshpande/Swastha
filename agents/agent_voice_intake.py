@@ -39,6 +39,7 @@ from agents.tools.db_tools import check_available_slots, get_patient_record, reg
 from agents.tools.intent_classifier import run_intent_fanout
 from agents.tools.llm_json import extract_json
 from agents.tools.redis_tools import cache_slots
+from agents.tools.translate_tools import translate_text
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,65 @@ MAX_INTAKE_ATTEMPTS = 3
 client = SarvamAI(api_subscription_key=os.environ["SARVAM_API_KEY"])
 
 _INTAKE_FIELDS = ("intent", "phone", "patient_name", "age", "department", "urgency")
+
+_DIGIT_WORD_MAP = {
+    # English
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+    # Hindi / Urdu romanised
+    "shunya": "0", "ek": "1", "do": "2", "teen": "3", "char": "4",
+    "paanch": "5", "chheh": "6", "saat": "7", "aath": "8", "nau": "9",
+    # Marathi romanised variants
+    "don": "2", "tin": "3", "paach": "5", "saha": "6", "nav": "9",
+    # Devanagari transliterations of English digit words
+    # (Sarvam STT outputs these when a Hindi/Marathi speaker says English digit words)
+    "नाईन": "9", "नाइन": "9",
+    "एट": "8", "ऐट": "8",
+    "सेव्हन": "7", "सेवन": "7",
+    "सिक्स": "6", "सिक्‍स": "6",
+    "फाईव्ह": "5", "फाइव": "5", "फाईव": "5",
+    "फोर": "4", "फ़ोर": "4",
+    "थ्री": "3", "थ्री": "3",
+    "टू": "2", "टु": "2",
+    "वन": "1", "वन्": "1",
+    "झीरो": "0", "झिरो": "0",
+}
+
+
+def _digits_from_text(text: str) -> str:
+    """Extract digit characters from text, converting word-form digits to numerals."""
+    result = []
+    for token in re.split(r"[\s,\-]+", text.lower()):
+        if token in _DIGIT_WORD_MAP:
+            result.append(_DIGIT_WORD_MAP[token])
+        else:
+            result.extend(c for c in token if c.isdigit())
+    return "".join(result)
+
+
+def _try_combine_partial_phone(collected: dict, messages: list[dict]) -> str | None:
+    """If the LLM returned phone=None but the conversation history has digit sequences,
+    attempt to combine prior partial digits + current message digits into a 10-digit number."""
+    existing = (collected.get("phone") or "").replace(" ", "")
+    if len(existing) == 10:
+        return existing  # already complete
+
+    # Scan all user messages for digit groups
+    all_digits = ""
+    for msg in messages:
+        if msg["role"] == "user":
+            all_digits += _digits_from_text(msg["content"])
+
+    if len(all_digits) == 10:
+        logger.info("voice_intake: assembled phone from conversation history: %s", all_digits)
+        return all_digits
+    if len(all_digits) > 10:
+        # Take last 10 digits (most recent partial overrides older noise)
+        candidate = all_digits[-10:]
+        logger.info("voice_intake: trimmed phone digits to last 10: %s", candidate)
+        return candidate
+    return None
+
 
 # Module-level store for background tasks keyed by session_id.
 # Tasks are created inside this module and awaited before the node returns,
@@ -180,6 +240,17 @@ async def voice_intake_node(state: AgentState) -> AgentState:
 
     intent = collected.get("intent")
     reply_text = extracted.get("reply")
+
+    # Guardrail: sarvam-30b defaults to Hindi regardless of lang_code because all
+    # few-shot examples in the prompt are in Hindi. Translate the reply to the correct
+    # language as a fallback — Sarvam Mayura (translate) is purpose-built for this.
+    if reply_text and lang_code not in ("hi-IN", "en-IN"):
+        try:
+            reply_text = await translate_text(reply_text, "hi-IN", lang_code)
+            logger.info("voice_intake: translated reply to %s", lang_code)
+        except Exception:
+            logger.exception("voice_intake: translation guardrail failed, using original reply")
+
     messages = [*state["messages"]]
     if reply_text:
         messages.append({"role": "assistant", "content": reply_text})
@@ -239,36 +310,42 @@ async def voice_intake_node(state: AgentState) -> AgentState:
     is_new_patient = state.get("is_new_patient", False)
     phone = collected.get("phone")
 
-    # Phone-first gate: intent known but phone missing — ask for it
+    # If LLM returned phone=None or a partial number (< 10 digits), attempt to
+    # assemble a valid 10-digit number from the full conversation history.
+    # This handles split-number patterns: patient says "987654" then "3210".
+    phone_is_incomplete = not phone or (isinstance(phone, str) and len(re.sub(r"\D", "", phone)) < 10)
+    if phone_is_incomplete and not patient_id:
+        assembled = _try_combine_partial_phone(collected, state["messages"])
+        if assembled:
+            phone = assembled
+            collected["phone"] = phone
+            logger.info("voice_intake: partial phone assembled from history: %s", phone)
+        elif phone and len(re.sub(r"\D", "", phone)) < 10:
+            # LLM extracted a partial phone — clear it so phone gate triggers correctly
+            logger.info("voice_intake: extracted phone %r has < 10 digits — treating as incomplete", phone)
+            phone = None
+            collected["phone"] = None
+
+    # Phone gate: intent known but phone missing — prompt is already asking
+    # (the LLM combined phone+symptom ask in its reply). Return intent so
+    # Scenario 2 slot pre-fetch can fire immediately, but keep routing paused.
     if not phone and not patient_id:
-        PHONE_PROMPTS = {
-            "hi-IN": "कृपया अपना फ़ोन नंबर बताएं ताकि मैं आपकी जानकारी देख सकूँ।",
-            "mr-IN": "कृपया तुमचा फोन नंबर सांगा जेणेकरून मी तुमची माहिती पाहू शकेन।",
-            "en-IN": "Could you please share your phone number so I can look up your details?",
-        }
-        ask_phone = PHONE_PROMPTS.get(lang_code, PHONE_PROMPTS["en-IN"])
-        logger.info("voice_intake: intent=%s locked in collected, but no phone — asking", intent)
-        if not reply_text:
-            messages.append({"role": "assistant", "content": ask_phone})
+        logger.info("voice_intake: intent=%s known, awaiting phone (LLM already asked)", intent)
         return {
             **state,
             "messages": messages,
             "intake_collected": collected,
-            "intent": None,
+            "intent": intent,          # ← promoted early for Scenario 2 slot pre-fetch
             "department": collected.get("department", state.get("department")),
             "urgency": collected.get("urgency", "normal"),
         }
 
-    # Department gate: intent=book but no department yet — let LLM ask about symptoms
+    # Department gate REMOVED: if booking but no department, default to "general".
+    # Scheduler can refine based on patient history. Blocking on department was adding
+    # an extra turn — the combined phone+symptom ask covers both in one round-trip.
     if intent == "book" and not collected.get("department"):
-        logger.info("voice_intake: intent=book but department not yet inferred — awaiting symptoms")
-        return {
-            **state,
-            "messages": messages,
-            "intake_collected": collected,
-            "intent": None,
-            "urgency": collected.get("urgency", "normal"),
-        }
+        collected["department"] = "general"
+        logger.info("voice_intake: intent=book, no department inferred — defaulting to general")
 
     # ── Scenario 1: resolve background phone lookup ─────────────────────────
     if phone and not patient_id:

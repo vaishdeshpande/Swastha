@@ -1,5 +1,6 @@
 """Sarvam Mayura v1 (translate) and language identification wrappers."""
 
+import asyncio
 import logging
 import os
 
@@ -7,6 +8,8 @@ from sarvamai import SarvamAI
 
 logger = logging.getLogger(__name__)
 
+# Sync client — used via asyncio.to_thread so the blocking HTTP call runs in a
+# thread-pool worker and never blocks the LiveKit event loop.
 client = SarvamAI(api_subscription_key=os.environ["SARVAM_API_KEY"])
 
 
@@ -17,21 +20,31 @@ async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
         logger.debug("translate: source == target (%s), skipping API call", source_lang)
         return text
     logger.debug("translate: %s -> %s (%d chars)", source_lang, target_lang, len(text))
-    response = client.text.translate(
-        input=text,
-        source_language_code=source_lang,
-        target_language_code=target_lang,
-    )
-    result = response.translated_text
+
+    def _sync() -> str:
+        return client.text.translate(
+            input=text,
+            source_language_code=source_lang,
+            target_language_code=target_lang,
+        ).translated_text
+
+    result = await asyncio.to_thread(_sync)
     logger.debug("translate: done (%d chars -> %d chars)", len(text), len(result))
     return result
 
 
 async def sarvam_identify_language(text: str) -> str:
     """Fallback language detection when STT confidence is low.
-    Used by Agent 1 (Language Router)."""
+    Uses asyncio.to_thread so the blocking HTTP call doesn't stall the LiveKit
+    event loop. Avoids AsyncSarvamAI whose httpx client can bind to the wrong
+    event loop when initialised at module import time."""
     logger.debug("identify_language: running on %d chars", len(text))
-    response = client.text.identify_language(input=text)
-    lang_code = response.language_code
-    logger.info("identify_language: detected lang_code=%s", lang_code)
-    return lang_code
+    try:
+        lang_code = await asyncio.to_thread(
+            lambda: client.text.identify_language(input=text).language_code
+        )
+        logger.info("identify_language: detected lang_code=%s", lang_code)
+        return lang_code
+    except Exception:
+        logger.exception("identify_language: API call failed, defaulting to hi-IN")
+        return "hi-IN"

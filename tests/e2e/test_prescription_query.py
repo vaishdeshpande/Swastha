@@ -144,6 +144,84 @@ async def test_no_prescription_escalates_without_rx_llm_call():
 
 
 @pytest.mark.asyncio
+async def test_split_phone_across_turns_prescription():
+    """
+    Scenario from live conversation: patient gives phone in two parts.
+    Turn 1: "Meri dawai ke baare mein poochna tha" → intake asks for phone
+    Turn 2: "987654" → intake asks for rest
+    Turn 3: "3 2 1 0" → _try_combine_partial_phone assembles "9876543210" →
+             patient matched → prescription fetched.
+
+    LLM calls:
+      Turn 1: [intake_prescription_no_phone]   → 1 call, awaits phone
+      Turn 2: [intake_prescription_no_phone]   → 1 call, partial phone, still awaits
+      Turn 3: [intake_prescription]            → 1 call, assembly happens in Python,
+              [rx_answer]                      → 1 call, prescription returned
+    """
+    state = fresh_state(detected_language="hi-IN", detection_confidence=0.92)
+
+    _no_phone = {
+        "intent": "prescription",
+        "patient_name": None,
+        "phone": None,
+        "department": None,
+        "urgency": "normal",
+        "reply": "Bilkul. Aapka naam aur registered phone number bata dijiye?",
+    }
+    _partial_phone = {
+        "intent": "prescription",
+        "patient_name": None,
+        "phone": "987654",   # LLM picks up the partial but it's < 10 digits
+        "department": None,
+        "urgency": "normal",
+        "reply": "Number adhura lag raha hai — poora 10 digit ka number bataiye?",
+    }
+
+    # Turn 1 — intent captured, phone not given
+    with graph_mocks(
+        llm_responses=[_no_phone],
+        patient=PATIENT_RAMESH,
+        prescription=PRESCRIPTION_RAMESH,
+    ):
+        reply1, state = await run_turn(
+            inbound_graph, state,
+            "Meri dawai ke baare mein poochna tha",
+        )
+
+    assert state["intent"] == "prescription"
+    assert state["patient_id"] is None  # no phone yet
+
+    # Turn 2 — partial phone given
+    with graph_mocks(
+        llm_responses=[_partial_phone],
+        patient=PATIENT_RAMESH,
+        prescription=PRESCRIPTION_RAMESH,
+    ):
+        reply2, state = await run_turn(inbound_graph, state, "987654")
+
+    assert state["patient_id"] is None  # still waiting — partial
+
+    # Turn 3 — rest of phone given: Python helper assembles 9876543210
+    with graph_mocks(
+        llm_responses=[
+            # LLM returns phone=None (only sees "3 2 1 0" in isolation)
+            {**_no_phone, "reply": None},
+            rx_answer("Aapko Amlodipine 5mg subah leni hai."),
+        ],
+        patient=PATIENT_RAMESH,
+        prescription=PRESCRIPTION_RAMESH,
+    ):
+        reply3, state = await run_turn(inbound_graph, state, "3 2 1 0")
+
+    print_state("TURN 3 — split phone assembled → prescription returned", state)
+
+    assert state["patient_id"] == PATIENT_RAMESH["id"]
+    assert state["intent"] == "prescription"
+    assert state["escalation_required"] is False
+    assert "Amlodipine" in reply3
+
+
+@pytest.mark.asyncio
 async def test_prescription_multi_turn_history_grows():
     """
     Two consecutive prescription questions. Message history accumulates

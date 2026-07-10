@@ -13,12 +13,16 @@ class AgentState(TypedDict):
     tts_model: str                          # "bulbul:v3"
     detected_language: Optional[str]        # Raw language hint from STT metadata
     detection_confidence: Optional[float]   # STT confidence for detected_language
+    lang_mismatch_count: int                # Hysteresis counter — number of consecutive turns
+                                            # where STT detected_language ≠ current lang_code.
+                                            # Language only switches when this reaches 2.
+                                            # Resets to 0 on any matching turn.
 
     # ── Set by Agent 2 (Voice Intake) ──
     patient_id: Optional[str]               # Supabase UUID or None
     patient_name: Optional[str]
     is_new_patient: bool                    # True if registered during this call
-    intent: Optional[Literal["book", "prescription", "followup", "query"]]
+    intent: Optional[Literal["book", "prescription", "followup", "query", "lab", "billing"]]
     department: Optional[str]               # "cardiology", "general", "ortho", etc.
     urgency: Literal["normal", "urgent"]
     intake_attempt_count: int               # Clarification loop counter (max 3)
@@ -32,7 +36,9 @@ class AgentState(TypedDict):
 
     # ── Conversation ──
     messages: List[dict]                    # Full conversation history [{role, content}]
-    current_agent: str                      # "language_router" | "voice_intake" | "scheduler" | etc.
+    current_agent: str                      # "language_router" | "voice_intake" | "scheduler"
+                                            # | "prescription" | "lab_status" | "billing"
+                                            # | "followup" | "human_handoff" | "post_call"
                                             # Frontend reads this for Agent Activity Feed
 
     # ── Escalation ──
@@ -57,3 +63,10 @@ class AgentState(TypedDict):
     optimistic_patient_id: Optional[str]    # UUID reserved before DB write confirms (Scenario 1)
     prefetched_slots: Optional[List[dict]]  # Slots cached at voice_intake→scheduler boundary (Scenario 2)
     intent_classifier_scores: Optional[dict]  # {"book": float, "prescription": float} (Scenario 4)
+
+    # ── Set by Agent 6 (Lab Status) — for frontend data channel event ──
+    lab_reports_dispatched: Optional[List[dict]]  # [{test_name, summary}] read to patient this turn
+
+    # ── Set by Agent 7 (Billing) — for frontend data channel event ──
+    bill_amount_due: Optional[float]    # Amount read to patient (INR)
+    bill_sms_sent: Optional[bool]       # True if payment link was dispatched via SMS

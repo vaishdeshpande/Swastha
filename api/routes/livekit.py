@@ -1,3 +1,4 @@
+import json
 import os
 
 from fastapi import APIRouter, HTTPException
@@ -32,7 +33,12 @@ is already listening in the same room — it starts speaking as soon as the pati
 async def get_token(body: TokenRequest) -> TokenResponse:
     token = AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
     token.identity = body.participant_name
-    token = token.with_name(body.participant_name).with_grants(
-        VideoGrants(room_join=True, room=body.room_name, can_update_own_metadata=True)
+    # Embed preferred_lang in participant metadata so the LiveKit agent can read
+    # it synchronously at join time — before any utterance is transcribed.
+    token = (
+        token
+        .with_name(body.participant_name)
+        .with_metadata(json.dumps({"preferred_lang": body.preferred_lang}))
+        .with_grants(VideoGrants(room_join=True, room=body.room_name, can_update_own_metadata=True))
     )
     return TokenResponse(token=token.to_jwt())

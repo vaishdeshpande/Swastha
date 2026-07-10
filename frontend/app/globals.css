@@ -2,48 +2,46 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Devanagari font */
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Devanagari:wght@400;500;600&display=swap');
-
 :root {
-  --neo-bg: #e8eaf0;
-  --neo-shadow-light: #ffffff;
-  --neo-shadow-dark: #c5c8d2;
-  --neo-text: #4a4f6a;
-  --neo-text-muted: #8b90a8;
-  --neo-accent: #6c72cb;
-  --neo-accent-light: #eef0ff;
-  --neo-green: #5dba8a;
-  --neo-red: #e07070;
-  --neo-amber: #e0a870;
+  /* ── Emerald Ivory palette (from design) ── */
+  --neo-bg:           #ece8e2;
+  --neo-shadow-light: #fffefb;
+  --neo-shadow-dark:  #c2b9aa;
+  --neo-text:         #4a4640;
+  --neo-text-muted:   #948e82;
+  --neo-accent:       #2f7d6b;   /* deep emerald — active states, patient bubbles */
+  --neo-accent-light: #e4f0ec;
+  --neo-green:        #6bb08a;   /* sage green — start button, success */
+  --neo-red:          #c96a55;   /* terracotta — end button, error */
+  --neo-amber:        #c99a5b;
 
-  --neo-out-sm: 4px 4px 10px var(--neo-shadow-dark), -4px -4px 10px var(--neo-shadow-light);
-  --neo-out-md: 6px 6px 14px var(--neo-shadow-dark), -6px -6px 14px var(--neo-shadow-light);
-  --neo-out-lg: 10px 10px 24px var(--neo-shadow-dark), -10px -10px 24px var(--neo-shadow-light);
+  --neo-out-sm:  4px 4px 10px var(--neo-shadow-dark), -4px -4px 10px var(--neo-shadow-light);
+  --neo-out-md:  6px 6px 14px var(--neo-shadow-dark), -6px -6px 14px var(--neo-shadow-light);
+  --neo-out-lg:  10px 10px 24px var(--neo-shadow-dark), -10px -10px 24px var(--neo-shadow-light);
 
-  --neo-in-sm: inset 3px 3px 8px var(--neo-shadow-dark), inset -3px -3px 8px var(--neo-shadow-light);
-  --neo-in-md: inset 4px 4px 10px var(--neo-shadow-dark), inset -4px -4px 10px var(--neo-shadow-light);
+  --neo-in-sm:   inset 3px 3px 8px var(--neo-shadow-dark), inset -3px -3px 8px var(--neo-shadow-light);
+  --neo-in-md:   inset 4px 4px 10px var(--neo-shadow-dark), inset -4px -4px 10px var(--neo-shadow-light);
   --neo-in-hard: inset 5px 5px 12px var(--neo-shadow-dark), inset -5px -5px 12px var(--neo-shadow-light);
 
-  --neo-radius-sm: 10px;
-  --neo-radius-md: 16px;
-  --neo-radius-lg: 20px;
-  --neo-radius-xl: 28px;
+  --neo-radius-sm:   10px;
+  --neo-radius-md:   16px;
+  --neo-radius-lg:   20px;
+  --neo-radius-xl:   28px;
   --neo-radius-full: 9999px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --neo-bg: #1e2130;
-    --neo-shadow-light: #2a2f45;
-    --neo-shadow-dark: #13161f;
-    --neo-text: #c8ccde;
-    --neo-text-muted: #6b7090;
-    --neo-accent: #8b91e0;
-    --neo-accent-light: #2a2d4a;
-    --neo-green: #4aab7a;
-    --neo-red: #d06060;
-    --neo-amber: #c99860;
+    --neo-bg:           #1e2318;
+    --neo-shadow-light: #2a3020;
+    --neo-shadow-dark:  #141a10;
+    --neo-text:         #c8d4c0;
+    --neo-text-muted:   #6b7865;
+    --neo-accent:       #4dc99a;
+    --neo-accent-light: #1a3d2e;
+    --neo-green:        #4aab7a;
+    --neo-red:          #d06060;
+    --neo-amber:        #c99860;
   }
 }
 
@@ -56,7 +54,7 @@ body {
   background: var(--neo-bg);
   color: var(--neo-text);
   min-height: 100vh;
-  font-family: 'Noto Sans Devanagari', 'Segoe UI', system-ui, sans-serif;
+  font-family: 'Plus Jakarta Sans', 'Noto Sans Devanagari', 'Segoe UI', system-ui, sans-serif;
 }
 
 /* ---- Layout surfaces ---- */
@@ -64,7 +62,7 @@ body {
 .neo-screen {
   background: var(--neo-bg);
   border-radius: var(--neo-radius-xl);
-  padding: 1.5rem;
+  padding: 32px;
   box-shadow: var(--neo-out-lg);
   max-width: 960px;
   margin: 2rem auto;
@@ -113,16 +111,17 @@ body {
 
 .neo-lang-btn {
   flex: 1;
-  padding: 8px 4px;
+  padding: 10px 4px;
   border-radius: var(--neo-radius-sm);
   border: none;
   background: var(--neo-bg);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--neo-text-muted);
   cursor: pointer;
   box-shadow: var(--neo-out-sm);
   transition: all 0.15s;
+  font-family: inherit;
 }
 
 .neo-lang-btn.active {
@@ -135,9 +134,10 @@ body {
   cursor: not-allowed;
 }
 
+/* Start call — 88×88 sage green circle */
 .neo-btn-call-start {
-  width: 72px;
-  height: 72px;
+  width: 88px;
+  height: 88px;
   border-radius: var(--neo-radius-full);
   background: var(--neo-green);
   border: none;
@@ -146,29 +146,36 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.15s;
+  transition: box-shadow 0.15s ease, transform 0.1s ease;
+}
+.neo-btn-call-start:hover {
+  box-shadow: 8px 8px 18px var(--neo-shadow-dark), -8px -8px 18px var(--neo-shadow-light);
 }
 .neo-btn-call-start:active {
   box-shadow: var(--neo-in-hard);
-  transform: scale(0.95);
+  transform: scale(0.96);
 }
 .neo-btn-call-start:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
 
+/* End call — 60×60 terracotta circle */
 .neo-btn-call-end {
-  width: 44px;
-  height: 44px;
+  width: 60px;
+  height: 60px;
   border-radius: var(--neo-radius-full);
   background: var(--neo-red);
   border: none;
   cursor: pointer;
-  box-shadow: var(--neo-out-sm);
+  box-shadow: var(--neo-out-md);
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.15s;
+  transition: box-shadow 0.15s ease, transform 0.1s ease;
+}
+.neo-btn-call-end:hover {
+  box-shadow: var(--neo-out-md);
 }
 .neo-btn-call-end:active {
   box-shadow: var(--neo-in-hard);
@@ -180,14 +187,14 @@ body {
 .neo-status-badge {
   background: var(--neo-bg);
   border-radius: var(--neo-radius-full);
-  padding: 6px 14px;
+  padding: 7px 16px;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--neo-accent);
   box-shadow: var(--neo-in-sm);
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
 }
 
 .neo-status-dot {
@@ -196,14 +203,15 @@ body {
   border-radius: 50%;
   background: var(--neo-text-muted);
 }
-.neo-status-dot.listening { background: var(--neo-green); animation: neo-blink 1.2s infinite; }
-.neo-status-dot.processing { background: var(--neo-amber); animation: neo-blink 0.8s infinite; }
-.neo-status-dot.speaking { background: var(--neo-accent); animation: neo-blink 1s infinite; }
-.neo-status-dot.dropped { background: var(--neo-red); }
+.neo-status-dot.listening  { background: var(--neo-green);  animation: neo-blink 1.2s infinite; }
+.neo-status-dot.processing { background: var(--neo-amber);  animation: neo-blink 0.8s infinite; }
+.neo-status-dot.speaking   { background: var(--neo-accent); animation: neo-blink 1s infinite; }
+.neo-status-dot.greeting   { background: var(--neo-accent); animation: neo-blink 1s infinite; }
+.neo-status-dot.dropped    { background: var(--neo-red); }
 
 @keyframes neo-blink {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.25; }
+  50%       { opacity: 0.25; }
 }
 
 /* ---- Pulse ring ---- */
@@ -217,17 +225,17 @@ body {
 
 .neo-pulse-ring {
   position: absolute;
-  width: 72px;
-  height: 72px;
+  width: 88px;
+  height: 88px;
   border-radius: 50%;
   animation: neo-pulse 1.8s ease-out infinite;
   pointer-events: none;
 }
 
 @keyframes neo-pulse {
-  0% { box-shadow: 0 0 0 0 rgba(93, 186, 138, 0.5); }
-  70% { box-shadow: 0 0 0 20px rgba(93, 186, 138, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(93, 186, 138, 0); }
+  0%   { box-shadow: 0 0 0 0 rgba(107, 176, 138, 0.5); }
+  70%  { box-shadow: 0 0 0 20px rgba(107, 176, 138, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(107, 176, 138, 0); }
 }
 
 /* ---- Sound waves ---- */
@@ -236,7 +244,7 @@ body {
   display: none;
   align-items: center;
   gap: 3px;
-  height: 28px;
+  height: 26px;
 }
 
 .neo-waves.active {
@@ -250,17 +258,17 @@ body {
   opacity: 0.7;
 }
 
-.neo-wave-bar:nth-child(1) { height: 8px; animation: neo-wave 1s ease-in-out infinite 0.0s; }
-.neo-wave-bar:nth-child(2) { height: 18px; animation: neo-wave 1s ease-in-out infinite 0.1s; }
-.neo-wave-bar:nth-child(3) { height: 24px; animation: neo-wave 1s ease-in-out infinite 0.2s; }
-.neo-wave-bar:nth-child(4) { height: 18px; animation: neo-wave 1s ease-in-out infinite 0.3s; }
-.neo-wave-bar:nth-child(5) { height: 10px; animation: neo-wave 1s ease-in-out infinite 0.4s; }
+.neo-wave-bar:nth-child(1) { height: 8px;  animation: neo-wave 1s ease-in-out infinite 0.00s; }
+.neo-wave-bar:nth-child(2) { height: 18px; animation: neo-wave 1s ease-in-out infinite 0.10s; }
+.neo-wave-bar:nth-child(3) { height: 24px; animation: neo-wave 1s ease-in-out infinite 0.20s; }
+.neo-wave-bar:nth-child(4) { height: 18px; animation: neo-wave 1s ease-in-out infinite 0.30s; }
+.neo-wave-bar:nth-child(5) { height: 10px; animation: neo-wave 1s ease-in-out infinite 0.40s; }
 .neo-wave-bar:nth-child(6) { height: 20px; animation: neo-wave 1s ease-in-out infinite 0.15s; }
 .neo-wave-bar:nth-child(7) { height: 14px; animation: neo-wave 1s ease-in-out infinite 0.25s; }
 
 @keyframes neo-wave {
   0%, 100% { transform: scaleY(1); }
-  50% { transform: scaleY(0.35); }
+  50%       { transform: scaleY(0.35); }
 }
 
 /* ---- Agent activity rows ---- */
@@ -290,29 +298,30 @@ body {
   border-radius: 50%;
   flex-shrink: 0;
 }
-.neo-agent-dot.done { background: var(--neo-green); }
-.neo-agent-dot.active { background: var(--neo-accent); animation: neo-blink 1s infinite; }
+.neo-agent-dot.done    { background: var(--neo-green); }
+.neo-agent-dot.active  { background: var(--neo-accent); animation: neo-blink 1s infinite; }
 .neo-agent-dot.pending { background: var(--neo-shadow-dark); }
 
 .neo-agent-name { font-size: 12px; font-weight: 600; color: var(--neo-text); }
-.neo-agent-sub { font-size: 10px; color: var(--neo-text-muted); margin-top: 1px; }
+.neo-agent-sub  { font-size: 10px; color: var(--neo-text-muted); margin-top: 1px; }
 
 /* ---- Transcript ---- */
 
 .neo-transcript {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-height: 360px;
+  gap: 12px;
+  height: 456px;
   overflow-y: auto;
+  box-sizing: border-box;
 }
 
 .neo-msg-agent {
   background: var(--neo-bg);
   border-radius: var(--neo-radius-sm);
-  padding: 7px 10px;
-  font-size: 12px;
-  line-height: 1.5;
+  padding: 9px 13px;
+  font-size: 13px;
+  line-height: 1.6;
   max-width: 85%;
   align-self: flex-start;
   box-shadow: var(--neo-out-sm);
@@ -322,9 +331,9 @@ body {
 .neo-msg-patient {
   background: var(--neo-accent);
   border-radius: var(--neo-radius-sm);
-  padding: 7px 10px;
-  font-size: 12px;
-  line-height: 1.5;
+  padding: 9px 13px;
+  font-size: 13px;
+  line-height: 1.6;
   max-width: 85%;
   align-self: flex-end;
   box-shadow: var(--neo-out-sm);
@@ -340,26 +349,27 @@ body {
   letter-spacing: 0.05em;
 }
 
-/* ---- Booking confirmation ---- */
+/* ---- Booking / result cards ---- */
 
 .neo-booking-card {
   background: var(--neo-bg);
   border-radius: var(--neo-radius-lg);
-  padding: 1rem 1.25rem;
+  padding: 18px 20px;
   box-shadow: var(--neo-out-md);
   margin-top: 16px;
+  box-sizing: border-box;
 }
 
 .neo-booking-header {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 0.75rem;
+  margin-bottom: 12px;
 }
 
 .neo-check-circle {
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
   background: var(--neo-green);
   display: flex;
@@ -388,33 +398,51 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--neo-text-muted);
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .neo-booking-cell-val {
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--neo-text);
   margin-top: 2px;
+}
+
+/* ---- Session bar divider ---- */
+
+.neo-session-divider {
+  width: 1px;
+  align-self: stretch;
+  box-shadow: inset 1px 0 2px var(--neo-shadow-dark);
+  border-radius: 1px;
 }
 
 /* ---- Typography ---- */
 
 .neo-label {
   font-size: 10px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--neo-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   margin-bottom: 0.75rem;
 }
 
-.neo-text { font-size: 13px; color: var(--neo-text); }
-.neo-text-sm { font-size: 11px; color: var(--neo-text); }
-.neo-text-muted { font-size: 12px; color: var(--neo-text-muted); }
+.neo-text        { font-size: 13px;  color: var(--neo-text); }
+.neo-text-sm     { font-size: 11px;  color: var(--neo-text); }
+.neo-text-muted  { font-size: 12px;  color: var(--neo-text-muted); }
+.neo-mono        { font-family: monospace; }
 
 .neo-devanagari {
   font-family: 'Noto Sans Devanagari', system-ui, sans-serif;
   font-size: 13px;
   line-height: 1.6;
+}
+
+/* ---- Scrollbar (webkit) ---- */
+.neo-transcript::-webkit-scrollbar { width: 4px; }
+.neo-transcript::-webkit-scrollbar-track { background: transparent; }
+.neo-transcript::-webkit-scrollbar-thumb {
+  background: var(--neo-shadow-dark);
+  border-radius: 2px;
 }

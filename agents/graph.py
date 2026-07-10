@@ -10,6 +10,8 @@ from agents.agent_voice_intake import voice_intake_node
 from agents.agent_scheduler import scheduler_node, scheduler_outbound_node
 from agents.agent_prescription import prescription_node, prescription_outbound_node
 from agents.agent_followup import followup_outbound_node
+from agents.agent_lab_status import lab_status_node
+from agents.agent_billing import billing_node
 from agents.tools.notification_tools import escalate_to_doctor
 from agents.tools.translate_tools import translate_text
 from analytics.call_analytics import post_call_node
@@ -78,25 +80,48 @@ async def route_outbound_job_node(state: AgentState) -> AgentState:
 # ---------------------------------------------------------------------------
 
 def route_after_intake(state: AgentState) -> str:
-    """Decides which agent handles the patient's intent."""
+    """Decides which agent handles the patient's intent.
+
+    Intent is now promoted to state early (even before phone is collected) so
+    Scenario 2 slot pre-fetch can fire. We still gate specialist routing on
+    patient_id — if intent is known but phone hasn't been provided yet,
+    return await_input so the next utterance can supply the phone.
+    """
     if state.get("escalation_required", False):
         logger.debug("route_after_intake: escalation_required -> human_handoff")
         return "human_handoff"
+
     intent = state.get("intent")
-    if intent == "book":
-        logger.debug("route_after_intake: intent=book -> scheduler")
-        return "scheduler"
-    elif intent == "prescription":
-        logger.debug("route_after_intake: intent=prescription -> prescription")
-        return "prescription"
-    else:
-        # Intent not clear yet. Voice intake already added a clarifying
-        # question to messages. End this graph pass so the CLI/LiveKit can
-        # deliver that question and wait for the next user utterance.
-        # The next pass re-enters at language_router and voice_intake runs
-        # again with the new user message.
-        logger.debug("route_after_intake: intent unclear -> await_input (attempt=%d)", state.get("intake_attempt_count", 0))
+
+    # Phone not yet collected — intent is known but we can't call the DB.
+    # Voice intake's LLM reply already asked for phone, so wait for next turn.
+    if intent and not state.get("patient_id"):
+        logger.debug("route_after_intake: intent=%s but no patient_id yet -> await_input", intent)
         return "await_input"
+
+    intent_routes = {
+        "book": "scheduler",
+        "prescription": "prescription",
+        "lab": "lab_status",
+        "billing": "billing",
+        # "followup" is outbound-only (Agent 5). If a patient says "follow up" inbound,
+        # keep them in the intake loop to clarify what they actually need.
+        # "query" is too generic — clarify before routing.
+    }
+
+    if intent in intent_routes:
+        route = intent_routes[intent]
+        logger.debug("route_after_intake: intent=%s -> %s", intent, route)
+        return route
+
+    # Intent still unclear — check if we've exhausted attempts
+    attempt = state.get("intake_attempt_count", 0)
+    if attempt >= MAX_INTAKE_ATTEMPTS:
+        logger.warning("route_after_intake: max attempts reached without intent -> human_handoff")
+        return "human_handoff"
+
+    logger.debug("route_after_intake: intent unclear -> await_input (attempt=%d)", attempt)
+    return "await_input"
 
 
 def check_escalation(state: AgentState) -> str:
@@ -142,6 +167,8 @@ def build_inbound_graph():
     graph.add_node("voice_intake", voice_intake_node)
     graph.add_node("scheduler", scheduler_node)
     graph.add_node("prescription", prescription_node)
+    graph.add_node("lab_status", lab_status_node)
+    graph.add_node("billing", billing_node)
     graph.add_node("human_handoff", human_handoff_node)
     graph.add_node("post_call", post_call_node)
 
@@ -155,6 +182,8 @@ def build_inbound_graph():
         {
             "scheduler": "scheduler",
             "prescription": "prescription",
+            "lab_status": "lab_status",
+            "billing": "billing",
             "await_input": END,   # stop here; next user utterance restarts the graph
             "human_handoff": "human_handoff",
         },
@@ -171,6 +200,24 @@ def build_inbound_graph():
 
     graph.add_conditional_edges(
         "prescription",
+        check_escalation,
+        {
+            "human_handoff": "human_handoff",
+            "post_call": "post_call",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "lab_status",
+        check_escalation,
+        {
+            "human_handoff": "human_handoff",
+            "post_call": "post_call",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "billing",
         check_escalation,
         {
             "human_handoff": "human_handoff",

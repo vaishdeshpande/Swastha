@@ -1,7 +1,7 @@
 # api/CLAUDE.md — FastAPI Backend + Supabase + Upstash
 
 > **Read root CLAUDE.md first.** This file covers the FastAPI backend,
-> Supabase PostgreSQL schema, Upstash Redis client setup, and seed data.
+> Supabase PostgreSQL schema (8 tables — 6 original + 2 new), Upstash Redis client setup, and seed data.
 >
 > FastAPI is co-located with the LiveKit Agent Worker in a single Railway
 > deployment. They share the same Python process.
@@ -40,13 +40,15 @@ app.add_middleware(
 )
 
 # Register routers
-from api.routes import livekit, appointments, prescriptions, followup, analytics, doctors
+from api.routes import livekit, appointments, prescriptions, followup, analytics, doctors, lab, billing
 app.include_router(livekit.router, prefix="/api")
 app.include_router(appointments.router, prefix="/api")
 app.include_router(prescriptions.router, prefix="/api")
 app.include_router(followup.router, prefix="/api")
 app.include_router(analytics.router, prefix="/api")
 app.include_router(doctors.router, prefix="/api")
+app.include_router(lab.router, prefix="/api")        # NEW — Agent 6
+app.include_router(billing.router, prefix="/api")    # NEW — Agent 7
 ```
 
 **Railway Procfile:**
@@ -191,6 +193,67 @@ async def list_doctors(department: Optional[str] = None):
     return {"doctors": [dict(d) for d in await db.fetch_all(query)]}
 ```
 
+### GET `/api/lab/{patient_id}` — Get lab report status (NEW — Agent 6)
+
+```python
+# routes/lab.py
+@router.get("/lab/{patient_id}")
+async def get_lab_reports(patient_id: str):
+    """Get all pending and ready lab reports for a patient.
+    Excludes 'dispatched' reports — already delivered to patient.
+    Called by Agent 6 (lab_status_node) via get_lab_status() tool."""
+    reports = await db.fetch_all(
+        lab_reports.select().where(
+            lab_reports.c.patient_id == patient_id,
+            lab_reports.c.status.in_(["pending", "ready"]),
+        ).order_by(lab_reports.c.ordered_at.desc())
+    )
+    return {"reports": [dict(r) for r in reports]}
+
+@router.patch("/lab/{report_id}/dispatched")
+async def mark_dispatched(report_id: str):
+    """Mark a lab report as dispatched after it has been read to the patient.
+    Prevents re-reading the same result on a subsequent call."""
+    await db.execute(
+        lab_reports.update()
+        .where(lab_reports.c.report_id == report_id)
+        .values(status="dispatched")
+    )
+    return {"status": "dispatched"}
+```
+
+### GET `/api/billing/{patient_id}` — Get outstanding bill (NEW — Agent 7)
+
+```python
+# routes/billing.py
+@router.get("/billing/{patient_id}")
+async def get_patient_bill(patient_id: str):
+    """Get the most recent unpaid or partial bill for a patient.
+    Called by Agent 7 (billing_node) via get_bill() tool.
+    Returns None if no unpaid bills exist."""
+    bill = await db.fetch_one(
+        bills.select().where(
+            bills.c.patient_id == patient_id,
+            bills.c.status.in_(["unpaid", "partial"]),
+        ).order_by(bills.c.created_at.desc()).limit(1)
+    )
+    if not bill:
+        return {"bill": None}
+    return {"bill": dict(bill)}
+
+@router.post("/billing/{bill_id}/dispatch-link")
+async def dispatch_billing_link(bill_id: str, phone: str):
+    """Dispatch UPI payment link to patient's phone via Twilio SMS.
+    Called by Agent 7 after reading bill amount to patient.
+    Reuses send_sms() from notification_tools.py — no new infra."""
+    bill = await db.fetch_one(bills.select().where(bills.c.bill_id == bill_id))
+    if not bill or not bill["payment_link"]:
+        raise HTTPException(404, "Bill not found or no payment link available")
+    message = f"Pay your hospital bill of ₹{bill['amount_due']:.0f} here: {bill['payment_link']}\n— Hospital Receptionist"
+    await send_sms(phone, message)
+    return {"status": "dispatched"}
+```
+
 ---
 
 ## Supabase PostgreSQL Schema
@@ -307,6 +370,36 @@ class CallLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 ```
 
+class LabReport(Base):
+    __tablename__ = "lab_reports"
+
+    # NEW — used by Agent 6 (Lab Status)
+    report_id         = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    patient_id        = Column(UUID(as_uuid=True), ForeignKey("patients.id"), nullable=False, index=True)
+    test_name         = Column(String(200), nullable=False)       # "Blood CBC", "Lipid Panel", "HbA1c"
+    status            = Column(String(20), default="pending", index=True)
+                                                                  # "pending" | "ready" | "dispatched"
+                                                                  # Agent 6 only reads pending+ready
+                                                                  # dispatched = already read to patient
+    ordered_at        = Column(DateTime, default=datetime.utcnow)
+    ready_at          = Column(DateTime, nullable=True)
+    result_summary_en = Column(String(500), nullable=True)        # English summary — MUST translate before TTS
+
+
+class Bill(Base):
+    __tablename__ = "bills"
+
+    # NEW — used by Agent 7 (Billing)
+    bill_id      = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    patient_id   = Column(UUID(as_uuid=True), ForeignKey("patients.id"), nullable=False, index=True)
+    amount_due   = Column(Numeric(10, 2), nullable=False)
+    status       = Column(String(20), default="unpaid", index=True)  # "unpaid" | "partial" | "paid"
+                                                                      # Agent 7 only reads unpaid+partial
+    items_json   = Column(JSON, default=list)                # [{desc, qty, amount}]
+    payment_link = Column(Text, nullable=True)               # UPI deep link dispatched via Twilio SMS
+    created_at   = Column(DateTime, default=datetime.utcnow)
+
+
 ### Indexes (important for performance)
 
 The schema above already includes `index=True` on:
@@ -314,6 +407,8 @@ The schema above already includes `index=True` on:
 - `appointments.department` + `appointments.slot_date` + `appointments.status` — Agent 3 queries open slots
 - `discharge_followups.due_at` + `discharge_followups.status` — Cron job queries pending follow-ups
 - `call_logs.call_id` — Post-call subgraph writes analytics by call ID
+- `lab_reports.patient_id` + `lab_reports.status` — Agent 6 queries by patient + filters by status (NEW)
+- `bills.patient_id` + `bills.status` — Agent 7 queries by patient + filters unpaid/partial (NEW)
 
 ---
 
@@ -398,6 +493,65 @@ prescriptions = [
 ]
 ```
 
+### 3 Lab Reports (for Agent 6 testing) — NEW
+
+```python
+lab_reports = [
+    # Ready — will be read out in demo (Ramesh Kumar, hi-IN)
+    # result_summary_en will be translated to Hindi before TTS
+    {
+        "patient_id": patients[0]["id"],
+        "test_name": "Complete Blood Count (CBC)",
+        "status": "ready",
+        "ready_at": "2026-07-06T14:00:00",
+        "result_summary_en": "Hemoglobin is slightly low at 10.8 g/dL. All other values are within normal range. Please follow up with your doctor.",
+    },
+    # Pending — demo shows "still processing" message (Arun Patil, mr-IN)
+    {
+        "patient_id": patients[2]["id"],
+        "test_name": "Lipid Panel",
+        "status": "pending",
+        "ready_at": None,
+        "result_summary_en": None,
+    },
+    # Dispatched — must NOT appear in demo (verify get_lab_status excludes this)
+    {
+        "patient_id": patients[0]["id"],
+        "test_name": "Blood Glucose",
+        "status": "dispatched",
+        "ready_at": "2026-07-05T09:00:00",
+        "result_summary_en": "Blood glucose is 98 mg/dL, within normal fasting range.",
+    },
+]
+```
+
+### 2 Bills (for Agent 7 testing) — NEW
+
+```python
+bills = [
+    # Unpaid — demo reads amount + dispatches SMS link (Sunita Devi, hi-IN)
+    {
+        "patient_id": patients[1]["id"],
+        "amount_due": 3200.00,
+        "status": "unpaid",
+        "items_json": [
+            {"desc": "OPD Consultation", "qty": 1, "amount": 500},
+            {"desc": "Blood CBC Test",   "qty": 1, "amount": 700},
+            {"desc": "Medicines",         "qty": 1, "amount": 2000},
+        ],
+        "payment_link": "upi://pay?pa=hospital@okaxis&am=3200&cu=INR&tn=HospitalBill",
+    },
+    # Paid — must NOT appear in demo (verify get_bill filters status='paid')
+    {
+        "patient_id": patients[3]["id"],
+        "amount_due": 1500.00,
+        "status": "paid",
+        "items_json": [{"desc": "OPD Consultation", "qty": 1, "amount": 1500}],
+        "payment_link": None,
+    },
+]
+```
+
 ### 2 Discharge Records (for cron/Agent 5 testing)
 
 ```python
@@ -445,6 +599,7 @@ httpx>=0.27.0
 twilio>=9.0.0
 pyyaml>=6.0.0
 pydantic>=2.0.0
+langsmith>=0.1.0               # LangGraph auto-tracing — set LANGCHAIN_TRACING_V2=true to enable
 ```
 
 ---

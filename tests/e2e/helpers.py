@@ -18,11 +18,13 @@ from typing import Any
 def fresh_state(call_id: str = "e2e-call-001", **overrides) -> dict:
     """Build the initial AgentState exactly as livekit_agent._initial_state() does."""
     state = {
+        "session_id": "e2e-session-001",
         "lang_code": "hi-IN",
         "tts_voice": "priya",
         "tts_model": "bulbul:v3",
         "detected_language": None,
         "detection_confidence": None,
+        "lang_mismatch_count": 0,
         "patient_id": None,
         "patient_name": None,
         "is_new_patient": False,
@@ -42,6 +44,12 @@ def fresh_state(call_id: str = "e2e-call-001", **overrides) -> dict:
         "appointment_id": None,
         "job_type": None,
         "call_connected": True,
+        "optimistic_patient_id": None,
+        "prefetched_slots": None,
+        "intent_classifier_scores": None,
+        "lab_reports_dispatched": None,
+        "bill_amount_due": None,
+        "bill_sms_sent": None,
     }
     state.update(overrides)
     return state

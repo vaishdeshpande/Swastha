@@ -3,7 +3,7 @@ export type LangOption = "hi-IN" | "mr-IN" | "auto";
 export const LANGUAGE_OPTIONS: { code: LangOption; label: string }[] = [
   { code: "hi-IN", label: "Hindi" },
   { code: "mr-IN", label: "Marathi" },
-  { code: "auto", label: "Auto-detect" },
+  { code: "auto", label: "Auto" },
 ];
 
 export const AGENT_ORDER = [
@@ -11,6 +11,8 @@ export const AGENT_ORDER = [
   { key: "voice_intake", label: "Voice Intake", sublabel: "Understands intent" },
   { key: "scheduler", label: "Appointment Scheduler", sublabel: "Books slots" },
   { key: "prescription", label: "Prescription Agent", sublabel: "Reads medication" },
+  { key: "lab_status", label: "Lab Status", sublabel: "Report lookup" },
+  { key: "billing", label: "Billing Agent", sublabel: "Bill + payment link" },
   { key: "followup", label: "Follow-up Agent", sublabel: "Post-discharge" },
 ] as const;
 
@@ -41,6 +43,17 @@ export interface BookingDetails {
   time: string;
 }
 
+export interface LabReport {
+  test_name: string;
+  summary: string;
+  status?: "ready" | "pending";
+}
+
+export interface BillDetails {
+  amount: number;
+  sms_sent: boolean;
+}
+
 export interface CallSummary {
   durationSec: number;
   lang: LangOption;
@@ -55,5 +68,7 @@ export type AgentEvent =
   | { type: "agent_change"; agent: string }
   | { type: "status_change"; status: CallStatus }
   | { type: "booking_confirmed"; details: BookingDetails }
+  | { type: "lab_result_ready"; reports: LabReport[] }
+  | { type: "bill_read"; amount: number; sms_sent: boolean }
   | { type: "call_dropped"; reason: string }
   | { type: "error"; message: string };

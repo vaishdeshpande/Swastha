@@ -3,19 +3,68 @@ from api/database.py — all calls are awaited from LangGraph agent nodes."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from datetime import datetime
 
 from sqlalchemy import select
 
 from api.database import async_session
-from api.models import Appointment, CallLog, DischargeFollowup, Patient, Prescription
+from api.models import Appointment, Bill, CallLog, DischargeFollowup, LabReport, Patient, Prescription
 
 logger = logging.getLogger(__name__)
+
+# Spoken digit words in Hindi, Marathi, and English that STT may produce
+# when a patient recites their number verbally.
+_WORD_TO_DIGIT = {
+    # English
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+    # Hindi transliteration (common STT outputs)
+    "shunya": "0", "ek": "1", "do": "2", "teen": "3", "char": "4",
+    "paanch": "5", "chhe": "6", "saat": "7", "aath": "8", "nau": "9",
+    # Marathi transliteration
+    "unch": "0", "eka": "1", "don": "2", "tin": "3", "char": "4",
+    "panch": "5", "saha": "6", "sat": "7", "aath": "8", "nau": "9",
+}
+
+
+def _normalize_phone(raw: str) -> str:
+    """Normalize a phone number that may have been spoken as words.
+
+    Handles:
+    - "Nine Nine Nine Nine Nine Nine Nine Nine Nine Nine" → "9999999999"
+    - "नाइन नाइन नाइन..." (Hindi STT) → stripped to digits
+    - "+91 98765 43210" → "9876543210" (strip country code + spaces)
+    - Already-clean "9876543210" → unchanged
+    """
+    # Replace word-form digits (case-insensitive)
+    tokens = re.split(r"[\s\-]+", raw.strip())
+    digit_tokens = [_WORD_TO_DIGIT.get(t.lower(), t) for t in tokens]
+    joined = "".join(digit_tokens)
+
+    # Keep only digits
+    digits_only = re.sub(r"\D", "", joined)
+
+    # Strip leading country code: +91 or 0 prefix
+    if digits_only.startswith("91") and len(digits_only) == 12:
+        digits_only = digits_only[2:]
+    elif digits_only.startswith("0") and len(digits_only) == 11:
+        digits_only = digits_only[1:]
+
+    # Store with +91 prefix to match seed data format
+    if len(digits_only) == 10:
+        return f"+91{digits_only}"
+
+    # Return as-is if we can't clean it — DB will reject with a clear error
+    logger.warning("db: could not normalize phone '%s' → '%s'", raw, digits_only)
+    return digits_only
 
 
 async def get_patient_record(phone: str) -> dict | None:
     """Look up patient by phone number. Returns patient dict or None."""
+    phone = _normalize_phone(phone)
     async with async_session() as session:
         result = await session.execute(select(Patient).where(Patient.phone == phone))
         patient = result.scalar_one_or_none()
@@ -56,6 +105,7 @@ async def get_patient_record_by_id(patient_id: str) -> dict | None:
 
 async def register_patient(name: str, phone: str, age: int, lang_pref: str) -> str:
     """Create new patient in Supabase. Returns patient_id (UUID)."""
+    phone = _normalize_phone(phone)
     async with async_session() as session:
         patient = Patient(name=name, phone=phone, age=age, lang_pref=lang_pref)
         session.add(patient)
@@ -154,23 +204,29 @@ async def get_next_available(department: str, n: int = 3) -> list[dict]:
 
 async def book_slot(patient_id: str, slot_id: str) -> dict:
     """Book an appointment. Updates slot status to 'booked'. Returns
-    confirmation dict: {appointment_id, doctor_name, date, time, department}."""
-    async with async_session() as session:
-        slot = await session.get(Appointment, slot_id)
-        if not slot or slot.status != "open":
-            raise ValueError(f"Slot {slot_id} is not available")
-        slot.patient_id = patient_id
-        slot.status = "booked"
-        slot.booked_at = datetime.utcnow()
-        await session.commit()
-        logger.info("db: booked slot_id=%s for patient_id=%s doctor=%s", slot_id, patient_id, slot.doctor_name)
-        return {
-            "appointment_id": str(slot.id),
-            "doctor_name": slot.doctor_name,
-            "date": slot.slot_date,
-            "time": slot.slot_time,
-            "department": slot.department,
-        }
+    confirmation dict: {appointment_id, doctor_name, date, time, department}.
+
+    Wrapped in asyncio.shield so a LangGraph task cancellation mid-query
+    doesn't tear down the asyncpg connection before the commit completes."""
+    async def _do_book():
+        async with async_session() as session:
+            slot = await session.get(Appointment, slot_id)
+            if not slot or slot.status != "open":
+                raise ValueError(f"Slot {slot_id} is not available")
+            slot.patient_id = patient_id
+            slot.status = "booked"
+            slot.booked_at = datetime.utcnow()
+            await session.commit()
+            logger.info("db: booked slot_id=%s for patient_id=%s doctor=%s", slot_id, patient_id, slot.doctor_name)
+            return {
+                "appointment_id": str(slot.id),
+                "doctor_name": slot.doctor_name,
+                "date": slot.slot_date,
+                "time": slot.slot_time,
+                "department": slot.department,
+            }
+
+    return await asyncio.shield(_do_book())
 
 
 async def cancel_appointment(appointment_id: str) -> bool:
@@ -346,6 +402,109 @@ async def get_due_outbound_jobs() -> list[dict]:
             )
         logger.info("db: get_due_outbound_jobs -> %d job(s) due", len(jobs))
         return jobs
+
+
+# ---------------------------------------------------------------------------
+# Lab Reports — used by Agent 6 (Lab Status)
+# ---------------------------------------------------------------------------
+
+async def get_lab_status(patient_id: str) -> list[dict]:
+    """Get all pending and ready lab reports for a patient.
+    Excludes 'dispatched' — already delivered to the patient."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(LabReport)
+            .where(
+                LabReport.patient_id == patient_id,
+                LabReport.status.in_(["pending", "ready"]),
+            )
+            .order_by(LabReport.ordered_at.desc())
+        )
+        reports = result.scalars().all()
+        logger.debug("db: get_lab_status patient_id=%s -> %d report(s)", patient_id, len(reports))
+        return [
+            {
+                "report_id": str(r.report_id),
+                "test_name": r.test_name,
+                "status": r.status,
+                "ready_at": r.ready_at.isoformat() if r.ready_at else None,
+                "result_summary_en": r.result_summary_en,
+            }
+            for r in reports
+        ]
+
+
+async def mark_report_dispatched(report_id: str) -> None:
+    """Flip lab_reports.status from 'ready' to 'dispatched' after reading to patient."""
+    async with async_session() as session:
+        report = await session.get(LabReport, report_id)
+        if report:
+            report.status = "dispatched"
+            await session.commit()
+            logger.info("db: mark_report_dispatched report_id=%s", report_id)
+        else:
+            logger.warning("db: mark_report_dispatched — report_id=%s not found", report_id)
+
+
+# ---------------------------------------------------------------------------
+# Billing — used by Agent 7 (Billing)
+# ---------------------------------------------------------------------------
+
+async def get_bill(patient_id: str) -> dict | None:
+    """Get most recent unpaid or partial bill for a patient. Returns None if none exists."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(Bill)
+            .where(
+                Bill.patient_id == patient_id,
+                Bill.status.in_(["unpaid", "partial"]),
+            )
+            .order_by(Bill.created_at.desc())
+            .limit(1)
+        )
+        bill = result.scalars().first()
+        if not bill:
+            logger.debug("db: get_bill patient_id=%s -> no unpaid bills", patient_id)
+            return None
+        logger.debug("db: get_bill patient_id=%s -> bill_id=%s amount=%.2f", patient_id, bill.bill_id, bill.amount_due)
+        return {
+            "bill_id": str(bill.bill_id),
+            "amount_due": float(bill.amount_due),
+            "status": bill.status,
+            "items_json": bill.items_json,
+            "payment_link": bill.payment_link,
+        }
+
+
+async def get_bill_by_id(bill_id: str) -> dict | None:
+    """Get a specific bill by bill_id. Used by dispatch_payment_link."""
+    async with async_session() as session:
+        bill = await session.get(Bill, bill_id)
+        if not bill:
+            logger.warning("db: get_bill_by_id — bill_id=%s not found", bill_id)
+            return None
+        return {
+            "bill_id": str(bill.bill_id),
+            "amount_due": float(bill.amount_due),
+            "status": bill.status,
+            "items_json": bill.items_json,
+            "payment_link": bill.payment_link,
+        }
+
+
+async def dispatch_payment_link(bill_id: str, phone: str) -> None:
+    """Send UPI payment link to patient's phone via SMS. Reuses send_sms()."""
+    from agents.tools.notification_tools import send_sms
+    bill = await get_bill_by_id(bill_id)
+    if not bill or not bill.get("payment_link"):
+        logger.warning("db: dispatch_payment_link — bill_id=%s has no payment_link", bill_id)
+        return
+    message = (
+        f"Pay your hospital bill of ₹{bill['amount_due']:.0f} here: {bill['payment_link']}"
+        "\n— Hospital Receptionist"
+    )
+    await send_sms(phone, message)
+    logger.info("db: dispatch_payment_link sent SMS to phone=%s for bill_id=%s", phone, bill_id)
 
 
 async def schedule_outbound_job(patient_id: str, job_type: str, due_at: datetime) -> None:

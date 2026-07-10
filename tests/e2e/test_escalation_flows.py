@@ -27,34 +27,41 @@ from tests.e2e.mocks import (
 
 
 @pytest.mark.asyncio
-async def test_three_unclear_loops_in_one_turn_trigger_escalation():
+async def test_three_unclear_turns_trigger_escalation():
     """
-    Patient sends one vague message. Graph loops voice_intake 3 times
-    within the SINGLE ainvoke() before escalating.
+    Patient sends 3 vague messages across 3 separate turns.
+    Each unclear turn increments intake_attempt_count.
+    On the 3rd unclear turn, escalation_required is set → human_handoff.
 
-    3 LLM calls happen inside one run_turn():
-      [unclear, unclear, unclear] → escalation → human_handoff → END
-
-    Patient hears ONE final message (the transfer message from human_handoff).
+    3 run_turn() calls — one per patient utterance.
     """
     state = fresh_state(detected_language="hi-IN", detection_confidence=0.9)
 
+    for clarify_msg in [
+        "Main aapki baat samajh nahi paaya",
+        "Kripya dobara batayein",
+    ]:
+        with graph_mocks(
+            llm_responses=[intake_unclear(clarify_msg)],
+            patient=PATIENT_RAMESH,
+        ):
+            _, state = await run_turn(inbound_graph, state, "Haan woh cheez chahiye")
+
+    assert state["intake_attempt_count"] == 2
+    assert state["escalation_required"] is False
+
+    # Third unclear turn → escalation triggers
     with graph_mocks(
-        llm_responses=[
-            intake_unclear("Main aapki baat samajh nahi paaya"),  # loop 1, count=1
-            intake_unclear("Kripya dobara batayein"),             # loop 2, count=2
-            intake_unclear("Kya aap appointment chahte hain?"),   # loop 3, count=3 → escalate
-        ],
+        llm_responses=[intake_unclear("Kya aap appointment chahte hain?")],
         patient=PATIENT_RAMESH,
     ):
         reply, state = await run_turn(inbound_graph, state, "Haan woh cheez chahiye")
 
-    print_state("TURN — 3 unclear loops → escalation in single ainvoke()", state)
+    print_state("3 unclear turns → escalation", state)
 
     assert state["escalation_required"] is True
     assert state["intake_attempt_count"] == 3
-    # Transfer message from human_handoff_node
-    assert reply    # patient hears something, not silence
+    assert reply    # patient hears transfer message from human_handoff
     assert state["messages"][-1]["role"] == "assistant"
 
 
@@ -161,15 +168,19 @@ async def test_escalation_reply_is_non_empty():
     """
     Patient must always hear something when escalated — not silence.
     human_handoff_node appends the transfer message to messages.
+    Escalation happens after 3 consecutive unclear turns.
     """
     state = fresh_state(detected_language="hi-IN", detection_confidence=0.9)
 
+    for clarify_msg in ["Samajh nahi aaya", "Dobara batayein"]:
+        with graph_mocks(
+            llm_responses=[intake_unclear(clarify_msg)],
+            patient=PATIENT_RAMESH,
+        ):
+            _, state = await run_turn(inbound_graph, state, "Bas kuch chahiye tha")
+
     with graph_mocks(
-        llm_responses=[
-            intake_unclear("Samajh nahi aaya"),
-            intake_unclear("Dobara batayein"),
-            intake_unclear("Kya madad chahiye?"),
-        ],
+        llm_responses=[intake_unclear("Kya madad chahiye?")],
         patient=PATIENT_RAMESH,
     ):
         reply, state = await run_turn(inbound_graph, state, "Bas kuch chahiye tha")

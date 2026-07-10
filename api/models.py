@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Boolean, DateTime, JSON, Float, ForeignKey, Text
+from sqlalchemy import Column, String, Integer, Boolean, DateTime, JSON, Float, ForeignKey, Text, Numeric
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import declarative_base
 import uuid
@@ -89,3 +89,27 @@ class CallLog(Base):
     agents_used = Column(JSON)                                     # ["language_router", "voice_intake", "scheduler"]
     escalated = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class LabReport(Base):
+    __tablename__ = "lab_reports"
+
+    report_id         = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    patient_id        = Column(UUID(as_uuid=True), ForeignKey("patients.id"), nullable=False, index=True)
+    test_name         = Column(String(200), nullable=False)
+    status            = Column(String(20), default="pending", index=True)  # "pending" | "ready" | "dispatched"
+    ordered_at        = Column(DateTime, default=datetime.utcnow)
+    ready_at          = Column(DateTime, nullable=True)
+    result_summary_en = Column(String(500), nullable=True)
+
+
+class Bill(Base):
+    __tablename__ = "bills"
+
+    bill_id      = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    patient_id   = Column(UUID(as_uuid=True), ForeignKey("patients.id"), nullable=False, index=True)
+    amount_due   = Column(Numeric(10, 2), nullable=False)
+    status       = Column(String(20), default="unpaid", index=True)  # "unpaid" | "partial" | "paid"
+    items_json   = Column(JSON, default=list)
+    payment_link = Column(Text, nullable=True)
+    created_at   = Column(DateTime, default=datetime.utcnow)

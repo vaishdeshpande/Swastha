@@ -73,8 +73,17 @@ async def scheduler_node(state: AgentState) -> AgentState:
     logger.info("scheduler: decided action=%s", action)
 
     if action == "clarify":
-        if decision.get("reply"):
-            messages.append({"role": "assistant", "content": decision["reply"]})
+        reply = decision.get("reply")
+        if not reply:
+            # LLM returned clarify with no reply text — generate a department confirmation.
+            dept = state.get("department", "general")
+            reply = f"Aapke liye {dept} specialist se appointment book karein? Kya yeh theek hai?"
+        if lang_code not in ("hi-IN", "en-IN"):
+            try:
+                reply = await translate_text(reply, "hi-IN", lang_code)
+            except Exception:
+                logger.exception("scheduler: clarify translation failed, using original")
+        messages.append({"role": "assistant", "content": reply})
         return {**state, "messages": messages}
 
     if action == "check_slots":
@@ -145,6 +154,12 @@ async def scheduler_node(state: AgentState) -> AgentState:
 
     # Unknown action — fall back to a clarifying loop rather than crash the call.
     logger.warning("scheduler: unrecognized action=%r, falling back to clarify loop", action)
+    fallback_hi = "Kya aap appointment book karna chahte hain?"
+    try:
+        fallback = await translate_text(fallback_hi, "hi-IN", lang_code) if lang_code not in ("hi-IN", "en-IN") else fallback_hi
+    except Exception:
+        fallback = fallback_hi
+    messages.append({"role": "assistant", "content": fallback})
     return {**state, "messages": messages}
 
 

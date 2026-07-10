@@ -9,6 +9,7 @@ interface CallControlsProps {
   onLangChange: (lang: LangOption) => void;
   onStartCall: () => void;
   onEndCall: () => void;
+  onSimulateDrop?: () => void;
 }
 
 const STATUS_TEXT: Partial<Record<CallStatus, string>> = {
@@ -36,26 +37,36 @@ export default function CallControls({
   onLangChange,
   onStartCall,
   onEndCall,
+  onSimulateDrop,
 }: CallControlsProps) {
   const isPreCall = callStatus === "idle";
   const isInCall = !isPreCall && callStatus !== "ended" && callStatus !== "call_dropped";
 
   if (isPreCall) {
     return (
-      <div className="flex flex-col items-center gap-6">
+      <>
+        <p className="neo-label" style={{ textTransform: "uppercase", letterSpacing: "0.08em" }}>
+          Select Language
+        </p>
         <LanguageSelector value={preferredLang} onChange={onLangChange} />
-        <button type="button" className="neo-btn-call-start" onClick={onStartCall} aria-label="Start Call">
-          <PhoneIcon />
+        <button
+          type="button"
+          className="neo-btn-call-start"
+          onClick={onStartCall}
+          aria-label="Start Call"
+          style={{ marginTop: 6 }}
+        >
+          <PlayIcon />
         </button>
-        <p className="neo-text-muted">Start Call</p>
-      </div>
+        <p className="neo-text" style={{ fontSize: 13, fontWeight: 700 }}>Start Call</p>
+      </>
     );
   }
 
   if (isInCall) {
     const showWaves = callStatus === "listening";
     return (
-      <div className="flex flex-col items-center gap-4">
+      <>
         <div className="neo-status-badge">
           <span className={`neo-status-dot ${STATUS_DOT_CLASS[callStatus] ?? ""}`} />
           {STATUS_TEXT[callStatus]}
@@ -71,29 +82,49 @@ export default function CallControls({
           onClick={onEndCall}
           disabled={callStatus === "ending"}
           aria-label="End Call"
+          style={{ marginTop: 6 }}
         >
-          <PhoneOffIcon />
+          <StopIcon />
         </button>
-      </div>
+        <p className="neo-text" style={{ fontSize: 13, fontWeight: 700 }}>End Call</p>
+        {onSimulateDrop && (
+          <button
+            type="button"
+            onClick={onSimulateDrop}
+            style={{
+              background: "none", border: "none", color: "var(--neo-text-muted)",
+              fontSize: 10, cursor: "pointer", textDecoration: "underline",
+              marginTop: 0, fontFamily: "inherit",
+            }}
+          >
+            simulate dropped call
+          </button>
+        )}
+      </>
     );
   }
 
   return null;
 }
 
-function PhoneIcon() {
+function PlayIcon() {
   return (
-    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2">
-      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z" />
-    </svg>
+    <div style={{
+      width: 0, height: 0,
+      borderTop: "11px solid transparent",
+      borderBottom: "11px solid transparent",
+      borderLeft: "18px solid #ffffff",
+      marginLeft: 4,
+    }} />
   );
 }
 
-function PhoneOffIcon() {
+function StopIcon() {
   return (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2">
-      <line x1="23" y1="1" x2="1" y2="23" />
-      <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7a2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91" />
-    </svg>
+    <div style={{
+      width: 16, height: 16,
+      borderRadius: 3,
+      background: "#ffffff",
+    }} />
   );
 }

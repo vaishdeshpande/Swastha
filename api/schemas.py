@@ -28,8 +28,9 @@ class MedicineItem(BaseModel):
 class TokenRequest(BaseModel):
     room_name: str = Field(..., example="call-room-001")
     participant_name: str = Field(..., example="patient-ramesh")
+    preferred_lang: str = Field("auto", example="mr-IN", description="'hi-IN', 'mr-IN', or 'auto' for STT auto-detect")
 
-    model_config = {"json_schema_extra": {"example": {"room_name": "call-room-001", "participant_name": "patient-ramesh"}}}
+    model_config = {"json_schema_extra": {"example": {"room_name": "call-room-001", "participant_name": "patient-ramesh", "preferred_lang": "auto"}}}
 
 
 class TokenResponse(BaseModel):

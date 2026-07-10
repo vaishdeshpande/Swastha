@@ -18,6 +18,7 @@ from sarvamai import SarvamAI
 
 from agents.state import AgentState
 from agents.tools.db_tools import get_pending_discharge, schedule_outbound_job
+from agents.tools.pii_tools import scrub_pii
 from agents.tools.llm_json import extract_json
 from agents.tools.redis_tools import save_call_summary, save_lang_preference
 from api.database import async_session
@@ -116,6 +117,13 @@ async def save_call_log(
 async def post_call_node(state: AgentState) -> AgentState:
     """Post-call analytics: Batch STT + diarization + sarvam-30b analysis."""
     state["current_agent"] = "post_call"
+
+    # ── Guardrail 6: PII scrub before any logging ─────────────────────────────
+    scrubbed_messages = [
+        {**m, "content": scrub_pii(m["content"])} if m.get("content") else m
+        for m in state.get("messages", [])
+    ]
+    state = {**state, "messages": scrubbed_messages}
 
     # 1. Save call summary to Redis (Layer 2)
     summary = generate_call_summary(state["messages"])

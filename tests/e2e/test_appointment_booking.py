@@ -102,65 +102,75 @@ async def test_full_hindi_appointment_booking_two_turns():
 @pytest.mark.asyncio
 async def test_intent_unclear_once_then_resolved():
     """
-    First LLM call inside voice_intake returns intent=None (patient was vague).
-    Graph loops back to voice_intake within the SAME ainvoke().
-    Second LLM call returns intent=book (model resolves from now-richer context).
-    Scheduler runs right after.
+    Turn 1: patient is vague → voice_intake returns intent=None → clarification asked → await_input.
+    Turn 2: patient clarifies → intent=book resolved → scheduler runs.
 
-    Single run_turn, 3 LLM calls:
-      [voice_intake_unclear, voice_intake_book, sched_check_slots]
+    Graph routes to END (await_input) after each unclear turn, so two run_turns are needed.
+    2 LLM calls total across 2 turns: [intake_unclear] then [intake_book, sched_check_slots]
     """
     state = fresh_state(detected_language="hi-IN", detection_confidence=0.9)
 
+    # Turn 1 — vague utterance, get clarification
     with graph_mocks(
-        llm_responses=[
-            intake_unclear("Kya aap appointment chahte hain ya kuch aur?"),
-            intake_book(),             # second loop: model resolves intent from richer history
-            sched_check_slots(),
-        ],
+        llm_responses=[intake_unclear("Kya aap appointment chahte hain ya kuch aur?")],
+        patient=PATIENT_RAMESH,
+        slots=OPEN_SLOTS_GENERAL,
+    ):
+        _, state = await run_turn(inbound_graph, state, "Haan woh doctor wali cheez")
+
+    assert state["intake_attempt_count"] == 1
+    assert state["intent"] is None
+
+    # Turn 2 — patient clarifies with full details
+    with graph_mocks(
+        llm_responses=[intake_book(), sched_check_slots()],
         patient=PATIENT_RAMESH,
         slots=OPEN_SLOTS_GENERAL,
     ):
         reply, state = await run_turn(
             inbound_graph, state,
-            "Haan woh doctor wali cheez chahiye, main Ramesh hoon, +919876543210",
+            "Appointment chahiye, main Ramesh hoon, +919876543210",
         )
 
     print_state("TURN — intent unclear once then resolved", state)
 
     assert state["intent"] == "book"
     assert state["offered_slots"] is not None
-    assert state["intake_attempt_count"] == 1  # one unclear round happened
+    assert state["intake_attempt_count"] == 1
 
 
 @pytest.mark.asyncio
-async def test_intent_unclear_3_times_escalates_in_single_turn():
+async def test_intent_unclear_3_times_escalates():
     """
-    Patient is completely unclear. Graph loops voice_intake 3 times
-    within ONE ainvoke() before escalating.
+    Patient is completely unclear across 3 consecutive turns.
+    Each turn increments intake_attempt_count. On the 3rd unclear turn,
+    escalation_required is set and human_handoff runs.
 
-    This is NOT 3 separate run_turn() calls — it's 3 LLM calls inside
-    a single graph run:
-      [intake_unclear, intake_unclear, intake_unclear] → escalation
-
-    Patient hears ONE transfer message (the last assistant message).
+    3 separate run_turn() calls — one per patient utterance.
     """
     state = fresh_state(detected_language="hi-IN", detection_confidence=0.9)
 
+    for clarify_reply in [
+        "Main aapki baat samajh nahi paaya",
+        "Kripya dobara batayein",
+    ]:
+        with graph_mocks(
+            llm_responses=[intake_unclear(clarify_reply)],
+            patient=PATIENT_RAMESH,
+        ):
+            _, state = await run_turn(inbound_graph, state, "Haan woh cheez chahiye")
+
+    assert state["intake_attempt_count"] == 2
+    assert state["escalation_required"] is False
+
+    # Third unclear turn → escalation
     with graph_mocks(
-        llm_responses=[
-            intake_unclear("Main aapki baat samajh nahi paaya"),   # loop 1
-            intake_unclear("Kripya dobara batayein"),              # loop 2
-            intake_unclear("Kya aap appointment chahte hain?"),    # loop 3 → escalation
-        ],
+        llm_responses=[intake_unclear("Kya aap appointment chahte hain?")],
         patient=PATIENT_RAMESH,
     ):
-        reply, state = await run_turn(
-            inbound_graph, state,
-            "Haan woh cheez chahiye",
-        )
+        reply, state = await run_turn(inbound_graph, state, "Haan woh cheez chahiye")
 
-    print_state("TURN — 3 unclear loops → escalation", state)
+    print_state("3 unclear turns → escalation", state)
 
     assert state["escalation_required"] is True
     assert state["intake_attempt_count"] == 3

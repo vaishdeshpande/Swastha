@@ -1,8 +1,8 @@
 # agents/CLAUDE.md — LangGraph Multi-Agent System
 
 > **Read root CLAUDE.md first.** This file covers the LangGraph implementation:
-> both graphs (inbound + outbound), all 5 agents, shared state, tools, and
-> the LiveKit integration layer.
+> both graphs (inbound + outbound), all 5 agents + 2 new agents (Lab Status, Billing),
+> shared state, tools, the LiveKit integration layer, observability, and agentic design patterns.
 
 ---
 
@@ -11,11 +11,35 @@
 Two separate LangGraph `StateGraph` instances:
 
 1. **Inbound Graph** — triggered when a patient calls in or opens the website.
-   Flow: START → Agent 1 → Agent 2 → intent? → Agent 3 or 4 → escalate? → Post-Call Subgraph → END
+   Flow: START → Agent 1 → Agent 2 → intent? → Agent 3/4/6/7 → escalate? → Post-Call Subgraph → END
 2. **Outbound Graph** — triggered by APScheduler cron every 30 minutes.
    Flow: Cron → job_type? → Agent 3/4/5 outbound → risk? → Escalate → END
 
 Both graphs share the same `AgentState` TypedDict and the same tool functions.
+
+### Agentic Design Patterns in This System
+
+Nine distinct patterns are present. Understanding them helps you implement correctly
+and explains to interviewers why each design decision was made.
+
+| # | Pattern | Where | Category |
+|---|---|---|---|
+| 1 | **Router / Dispatcher** | `route_after_intake()` fans intent → specialist agent | Orchestration |
+| 2 | **Sequential Pipeline** | Agent 1 → Agent 2 always runs first, unconditional | Orchestration |
+| 3 | **Human-in-the-Loop** | Any agent sets `escalation_required=True` → `human_handoff_node` | Reliability |
+| 4 | **Stateful Multi-Turn** | `intake_collected` accumulates fields across turns, never re-asks | Memory |
+| 5 | **Multi-Layer Memory** | RAM (AgentState) → Redis (TTL) → Supabase (permanent) | Memory |
+| 6 | **Tool-Calling / ReAct** | Agents 3, 4, 5 — LLM picks tool, calls it, observes result | Action |
+| 7 | **Guardrails** | Input (emergency check, confidence) + Output (lang consistency, medical boundary) | Reliability |
+| 8 | **Event-Driven / Cron Subgraph** | APScheduler → outbound graph — proactive, not reactive | Action |
+| 9 | **Post-Processing Subgraph** | `post_call_node` — analytics + scheduling after patient hangs up | Action |
+
+**Pattern notes for implementation:**
+- Patterns 1 and 2 together explain the graph structure: pipeline first (fixed), router second (conditional).
+- Pattern 4 (`intake_collected`) is the most important UX pattern — without it patients repeat themselves.
+- Pattern 6 (Tool-Calling) applies to Agents 3/4/5 only. Agents 1, 6, 7 do NOT use LLM tool-calling — they call one predetermined function.
+- Pattern 7 guardrails run at the LiveKit session layer, NOT inside the graph. They fire even if the graph crashes.
+- Pattern 8 is what makes this system proactive. Most voice agents are purely reactive.
 
 ---
 
@@ -44,7 +68,10 @@ class AgentState(TypedDict):
     patient_id: Optional[str]               # Supabase UUID or None
     patient_name: Optional[str]
     is_new_patient: bool                    # True if registered during this call
-    intent: Optional[Literal["book", "prescription", "followup", "query"]]
+    intent: Optional[Literal[
+        "book", "prescription", "followup", "query",
+        "lab", "billing"                    # NEW — Agent 6 and Agent 7
+    ]]
     department: Optional[str]               # "cardiology", "general", "ortho", etc.
     urgency: Literal["normal", "urgent"]
     intake_attempt_count: int               # Clarification loop counter (max 3)
@@ -59,7 +86,9 @@ class AgentState(TypedDict):
 
     # ── Conversation ──
     messages: List[dict]                    # Full conversation history [{role, content}]
-    current_agent: str                      # "language_router" | "voice_intake" | "scheduler" | etc.
+    current_agent: str                      # "language_router" | "voice_intake" | "scheduler"
+                                            # | "prescription" | "lab_status" | "billing"
+                                            # | "followup" | "human_handoff" | "post_call"
                                             # Frontend reads this for Agent Activity Feed
 
     # ── Escalation ──
@@ -85,6 +114,7 @@ class AgentState(TypedDict):
 - Each agent ONLY writes to its own section. Agent 1 never touches `patient_id`. Agent 3 never touches `lang_code`.
 - `messages` is append-only. Never delete or modify earlier messages.
 - `current_agent` is updated at the START of each agent node (first line of the function). This is what the frontend reads via WebSocket.
+- `intent` now has 6 valid values: `"book"`, `"prescription"`, `"followup"`, `"query"`, `"lab"`, `"billing"`. Agent 2 extracts all six. Only the new two route to new agents.
 
 ---
 
@@ -97,6 +127,7 @@ from langgraph.graph import StateGraph, END
 
 graph = StateGraph(AgentState)
 
+# Existing nodes — DO NOT change
 graph.add_node("language_router", language_router_node)
 graph.add_node("voice_intake", voice_intake_node)
 graph.add_node("scheduler", scheduler_node)
@@ -104,51 +135,63 @@ graph.add_node("prescription", prescription_node)
 graph.add_node("human_handoff", human_handoff_node)
 graph.add_node("post_call", post_call_node)
 
+# NEW nodes — Agent 6 and Agent 7
+graph.add_node("lab_status", lab_status_node)      # agents/agent_lab_status.py
+graph.add_node("billing", billing_node)            # agents/agent_billing.py
+
 graph.set_entry_point("language_router")
 ```
 
 ### Edge definitions
 
 ```python
-# Agent 1 → Agent 2 (always, unconditional)
+# Agent 1 → Agent 2 (always, unconditional) — UNCHANGED
 graph.add_edge("language_router", "voice_intake")
 
-# Agent 2 → conditional router
+# Agent 2 → conditional router — UPDATED with 2 new branches
 graph.add_conditional_edges(
     "voice_intake",
     route_after_intake,
     {
-        "scheduler": "scheduler",
+        "scheduler":    "scheduler",
         "prescription": "prescription",
-        "await_input": END,           # stop here; next user utterance restarts the graph
+        "lab_status":   "lab_status",      # NEW
+        "billing":      "billing",         # NEW
+        "await_input":  END,               # stop; next utterance re-enters at language_router
         "human_handoff": "human_handoff",
     }
 )
 
-# Agent 3 → escalation check
+# Agent 3 → escalation check — UNCHANGED
 graph.add_conditional_edges(
     "scheduler",
     check_escalation,
-    {
-        "human_handoff": "human_handoff",
-        "post_call": "post_call",
-    }
+    {"human_handoff": "human_handoff", "post_call": "post_call"}
 )
 
-# Agent 4 → escalation check
+# Agent 4 → escalation check — UNCHANGED
 graph.add_conditional_edges(
     "prescription",
     check_escalation,
-    {
-        "human_handoff": "human_handoff",
-        "post_call": "post_call",
-    }
+    {"human_handoff": "human_handoff", "post_call": "post_call"}
 )
 
-# Human handoff → END
-graph.add_edge("human_handoff", END)
+# Agent 6 → escalation check — NEW (same pattern as A3/A4)
+graph.add_conditional_edges(
+    "lab_status",
+    check_escalation,
+    {"human_handoff": "human_handoff", "post_call": "post_call"}
+)
 
-# Post-call → END
+# Agent 7 → escalation check — NEW (same pattern as A3/A4)
+graph.add_conditional_edges(
+    "billing",
+    check_escalation,
+    {"human_handoff": "human_handoff", "post_call": "post_call"}
+)
+
+# Terminals — UNCHANGED
+graph.add_edge("human_handoff", END)
 graph.add_edge("post_call", END)
 ```
 
@@ -156,7 +199,8 @@ graph.add_edge("post_call", END)
 
 ```python
 def route_after_intake(state: AgentState) -> str:
-    """Decides which agent handles the patient's intent."""
+    """Decides which agent handles the patient's intent.
+    UPDATED: added 'lab' and 'billing' branches. All other logic unchanged."""
     if state.get("escalation_required", False):
         return "human_handoff"
     intent = state.get("intent")
@@ -164,6 +208,10 @@ def route_after_intake(state: AgentState) -> str:
         return "scheduler"
     elif intent == "prescription":
         return "prescription"
+    elif intent == "lab":           # NEW
+        return "lab_status"
+    elif intent == "billing":       # NEW
+        return "billing"
     else:
         # Intent not clear yet. Voice intake already added a clarifying question
         # to messages. Return END ("await_input") so the CLI/LiveKit can deliver
@@ -175,7 +223,8 @@ def route_after_intake(state: AgentState) -> str:
 
 
 def check_escalation(state: AgentState) -> str:
-    """After Agent 3 or 4 completes, check if escalation is needed."""
+    """After any specialist agent completes, check if escalation is needed.
+    Used by Agents 3, 4, 6, and 7. UNCHANGED."""
     if state.get("escalation_required", False):
         return "human_handoff"
     return "post_call"
@@ -184,6 +233,8 @@ def check_escalation(state: AgentState) -> str:
 ---
 
 ## Outbound Graph — `graph.py` (second graph)
+
+**UNCHANGED from previous version.** Reproduced here for reference.
 
 ```python
 outbound_graph = StateGraph(AgentState)
@@ -201,88 +252,71 @@ outbound_graph.add_conditional_edges(
     route_outbound_job,
     {
         "confirmation": "scheduler_outbound",
-        "rx_reminder": "prescription_outbound",
-        "followup": "followup_outbound",
+        "rx_reminder":  "prescription_outbound",
+        "followup":     "followup_outbound",
     }
 )
 
-# Agent 5 (followup) → risk check
 outbound_graph.add_conditional_edges(
     "followup_outbound",
     check_risk,
-    {
-        "escalate": "escalate",
-        "end": END,
-    }
+    {"escalate": "escalate", "end": END}
 )
 
-# Others → END directly
 outbound_graph.add_edge("scheduler_outbound", END)
 outbound_graph.add_edge("prescription_outbound", END)
 outbound_graph.add_edge("escalate", END)
 ```
 
-### Outbound routing
+### Outbound routing + cron trigger — UNCHANGED
 
 ```python
 def route_outbound_job(state: AgentState) -> str:
-    """Reads the job_type field set by the cron trigger."""
-    job_type = state.get("job_type")  # Set by APScheduler before invoking graph
-    if job_type == "confirmation":
-        return "confirmation"
-    elif job_type == "rx_reminder":
-        return "rx_reminder"
-    elif job_type == "followup":
-        return "followup"
+    job_type = state.get("job_type")
+    if job_type == "confirmation":  return "confirmation"
+    elif job_type == "rx_reminder": return "rx_reminder"
+    elif job_type == "followup":    return "followup"
     raise ValueError(f"Unknown job_type: {job_type}")
 
-
 def check_risk(state: AgentState) -> str:
-    """After Agent 5 follow-up, check readmission risk."""
     outcome = state.get("call_outcome", {})
     risk_score = outcome.get("readmission_risk", 0.0)
-    if risk_score > 0.7:
-        return "escalate"
+    if risk_score > 0.7: return "escalate"
     return "end"
 ```
-
-### Cron trigger (APScheduler)
 
 ```python
 # In api/main.py — register this on app startup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
 scheduler = AsyncIOScheduler()
 
 @scheduler.scheduled_job("interval", minutes=30)
 async def run_outbound_jobs():
-    """Query due_followups and pending_confirmations from Supabase.
-    For each due job, invoke the outbound LangGraph with the right job_type."""
-    due_jobs = await get_due_outbound_jobs()  # queries Supabase
+    due_jobs = await get_due_outbound_jobs()
     for job in due_jobs:
         initial_state = {
             "patient_id": job["patient_id"],
-            "lang_code": job["lang_code"],
-            "tts_voice": job["tts_voice"],
-            "job_type": job["job_type"],  # "confirmation" | "rx_reminder" | "followup"
-            "messages": [],
+            "lang_code":  job["lang_code"],
+            "tts_voice":  job["tts_voice"],
+            "job_type":   job["job_type"],
+            "messages":   [],
             "current_agent": "route_job",
             "escalation_required": False,
         }
         await outbound_graph.ainvoke(initial_state)
 
-scheduler.start()  # Called in FastAPI lifespan
+scheduler.start()
 ```
 
 ---
 
-## The 5 Agents — Implementation Details
+## The 7 Agents — Implementation Details
 
 ### Agent 1 — Language Router (`agent_language_router.py`)
 
-**Role:** Always runs first. Detects language, sets voice persona. No DB calls. No LLM.
+**UNCHANGED.** Reproduced for completeness.
 
-**Implementation:**
+**Role:** Always runs first. Detects language, sets voice persona. No DB calls. No LLM.
 
 ```python
 async def language_router_node(state: AgentState) -> AgentState:
@@ -292,268 +326,340 @@ async def language_router_node(state: AgentState) -> AgentState:
     cached_lang = await redis_get(f"lang_pref:{state.get('patient_id', 'unknown')}")
     if cached_lang:
         lang_config = load_language_config(cached_lang)
-        return {
-            **state,
-            "lang_code": cached_lang,
-            "tts_voice": lang_config["tts_voice"],
-            "tts_model": lang_config["tts_model"],
-        }
+        return {**state, "lang_code": cached_lang, "tts_voice": lang_config["tts_voice"], "tts_model": lang_config["tts_model"]}
 
-    # 2. If no cache, STT auto-detects from first utterance.
-    #    Saaras v3 with language="unknown" returns detected_language in response metadata.
-    #    The LiveKit agent session handles this — we just read the detected lang
-    #    from the STT response metadata.
-    detected_lang = state.get("detected_language") or "hi-IN"  # Default to Hindi
+    # 2. STT auto-detects. Read detected_language from STT metadata.
+    detected_lang = state.get("detected_language") or "hi-IN"
 
-    # 3. Fallback: If STT detection confidence is missing or low (< 0.6), call
-    #    Sarvam Language ID API. Missing confidence happens when the message came
-    #    from plain text (CLI test) with no STT metadata.
+    # 3. Fallback: if confidence missing or < 0.6, call Sarvam Language ID API
     detection_confidence = state.get("detection_confidence")
     if detection_confidence is None or detection_confidence < 0.6:
         detected_lang = await sarvam_identify_language(state["messages"][-1]["content"])
 
-    # 4. Load language config from languages.yaml
     lang_config = load_language_config(detected_lang)
-
-    return {
-        **state,
-        "lang_code": detected_lang,
-        "tts_voice": lang_config["tts_voice"],
-        "tts_model": lang_config["tts_model"],
-    }
+    return {**state, "lang_code": detected_lang, "tts_voice": lang_config["tts_voice"], "tts_model": lang_config["tts_model"]}
 ```
-
-**Key behaviors:**
-- Pure routing — no conversation with the patient here
-- Reads from Upstash Redis FIRST (skip detection on repeat callers)
-- Falls back to Sarvam Language ID API if STT confidence is low
-- Handles mid-call language switches: if any downstream agent detects a language change in the utterance, control returns here to re-route
 
 ---
 
 ### Agent 2 — Voice Intake (`agent_voice_intake.py`)
 
-**Role:** Collects patient identity and intent. Registers new patients silently in background.
+**UPDATED: two new intent values added to system prompt and `intake_collected`.** All existing logic unchanged.
 
-**Sarvam APIs used:** sarvam-30b (structured extraction), Saaras v3 STT
+**Role:** Collects patient identity and intent. Registers new patients silently.
 
-**Tool calls:**
-- `get_patient_record(phone: str) -> dict | None` — looks up patient in Supabase by phone
-- `register_patient(name, phone, age, lang_pref) -> str` — creates patient in Supabase, returns patient_id
+**Tool calls:** `get_patient_record(phone)`, `register_patient(name, phone, age, lang_pref)`
 
-**System prompt (core logic):**
+**System prompt update — add these two lines to the intent classification:**
 
 ```
-You are a hospital receptionist voice agent. You are speaking to a patient in {lang_code}.
-Your job is to:
-1. Greet them warmly in their language
-2. Ask for their name and phone number
-3. Determine their intent: do they want to book an appointment, ask about their prescription, or something else?
-4. Extract: {name, phone, age, department, urgency, intent}
+# EXISTING intents (unchanged):
+# book, prescription, followup, query
 
-Rules:
-- If get_patient_record returns None, call register_patient silently (passing name, phone, age, lang_pref).
-  DO NOT tell the patient they are being registered. Continue the conversation naturally.
-- If intent is unclear after the first exchange, ask ONE clarifying question. Max 3 rounds.
-- After 3 unclear rounds, set escalation_required=True.
-- Always respond in {lang_code}. Handle code-mixing naturally (Hinglish, Marathlish).
-- Extract urgency from context: "bahut dard" / "emergency" / "jaldi" = "urgent". Default is "normal".
-- If you know the intent but the patient hasn't given a phone number yet, ask for it before proceeding.
+# NEW intents to detect:
+# "lab"     → patient asks about lab/blood test report status
+#             Signals: "report aayi kya", "blood test result", "mera report ready hai kya"
+# "billing" → patient asks about bill, payment, outstanding amount
+#             Signals: "bill kitna hai", "payment karna hai", "kitna baki hai", "outstanding amount"
 
-Output JSON:
+Output JSON — intent field now accepts 6 values:
 {
   "patient_name": "...",
   "phone": "...",
   "age": 0,
-  "intent": "book" | "prescription" | "followup" | "query",
+  "intent": "book" | "prescription" | "followup" | "query" | "lab" | "billing",
   "department": "...",
   "urgency": "normal" | "urgent"
 }
 ```
 
-**Key behaviors:**
-
-- **Structured intake checklist (`intake_collected`):** On every turn, `voice_intake_node` reads `state["intake_collected"]`, passes it to the system prompt via `build_voice_intake_prompt(lang_code, already_collected)`, and merges new non-None extractions back in. Fields set in earlier turns are never overwritten with `null`. This means:
-  - Turn 1: patient says "I want an appointment" → `collected = {intent: "book"}`
-  - Turn 2: patient says "9876543210" → LLM sees intent already collected, extracts only phone → `collected = {intent: "book", phone: "9876543210"}` → proceeds to DB lookup
-  - The LLM is never given a blank slate — it only fills in what's still missing.
-
-- **Phone-first gate:** If `intent` is known but `phone` is still `None` and no `patient_id` exists yet, the node appends a language-specific phone prompt and returns with top-level `intent=None` so `route_after_intake` emits `"await_input"` → `END`. The intent is preserved in `intake_collected` and will be picked up next turn without re-asking.
-
-- **Silent registration:** If `get_patient_record(phone)` returns None, call `register_patient(name, phone, age, lang_pref)` immediately. The patient hears no pause.
-
-- **Max 3 clarification loops:** tracks `intake_attempt_count` in state. After 3 unclear rounds (intent still None), sets `escalation_required=True` and the graph routes to Human Handoff.
-
-- **Writes `recent_calls`** summary to Upstash Redis at the end of the call (via post-call subgraph).
+**Key behaviors (all unchanged from previous version):**
+- `intake_collected` accumulates partial fields across turns — never re-asks
+- Phone-first gate: intent known but phone missing → prompt for phone, preserve intent in `intake_collected`
+- Silent registration: `get_patient_record` returns None → call `register_patient` immediately
+- Max 3 clarification loops → `escalation_required=True`
 
 ---
 
-### Agent 3 — Appointment Scheduler (`agent_scheduler.py`)
+### Agent 3 — Appointment Scheduler (`agent_scheduler.py`) — UNCHANGED
 
-**Role:** Books, reschedules, or cancels OPD appointments. Core business logic agent.
+**Tool calls:** `check_available_slots`, `get_next_available`, `book_slot`, `cancel_appointment`, `confirm_appointment`, `translate_text`
 
-**Sarvam APIs used:** sarvam-30b (reasoning + conversation), Bulbul v3 TTS, Mayura v1 Translate
-
-**Tool calls:**
-- `check_available_slots(department: str, date: str) -> List[dict]` — queries Supabase appointments table
-- `get_next_available(department: str, n: int = 3) -> List[dict]` — if no slots on requested date, returns next 3 available across any date
-- `book_slot(patient_id: str, slot_id: str) -> dict` — writes to Supabase appointments, returns confirmation dict with `appointment_id, doctor_name, date, time`
-- `cancel_appointment(appointment_id: str) -> bool` — updates status to "cancelled"
-- `confirm_appointment(appointment_id: str) -> None` — marks appointment as confirmed (used by outbound node)
-- `translate_text(text: str, source_lang: str, target_lang: str) -> str` — Sarvam Translate API
-
-**System prompt (core logic):**
-
-```
-You are the appointment scheduling agent for a hospital. The patient speaks {lang_code}.
-
-Available tools: check_available_slots, get_next_available, book_slot, cancel_appointment,
-                 confirm_appointment, translate_text
-
-Workflow:
-1. Patient wants to book → call check_available_slots(department, date)
-2. If slots available → present top 3 options in patient's language → patient picks one → call book_slot
-3. If NO slots available → call get_next_available(department, 3) → present 3 alternatives across dates
-4. After booking → translate the confirmation message to {lang_code} using translate_text
-5. The confirmation includes: doctor name, date, time
-
-LLM decision object (action field):
-- "clarify"         → ask the patient a clarifying question (reply field holds the text)
-- "check_slots"     → call check_available_slots; date field may be "any"
-- "confirm_booking" → call book_slot with chosen_slot_id
-- "cancel"          → call cancel_appointment with cancel_appointment_id
-- "reschedule"      → cancel old slot, then offer new ones via check_available_slots / get_next_available
-
-Rules:
-- Never confirm a booking without the patient explicitly agreeing to the slot
-- If the patient seems confused or distressed, set distress=true in the JSON → escalation
-- All responses in {lang_code}
-```
-
-**Outbound variant (Agent 3 outbound — `scheduler_outbound_node`):**
-- Called by cron for appointment confirmations
-- Script translated to patient's language: "This is a reminder call about your upcoming appointment tomorrow. Will you be attending?"
-- If patient declines or wants to reschedule → delegates to `scheduler_node` (reuses full inbound logic)
-- If patient confirms → calls `confirm_appointment(appointment_id)` and closes with a translated confirmation
-- Sets `call_outcome: {"confirmed": True}` on success
+No changes. See previous version for full system prompt and tool call details.
 
 ---
 
-### Agent 4 — Prescription Reminder (`agent_prescription.py`)
+### Agent 4 — Prescription Reminder (`agent_prescription.py`) — UNCHANGED
 
-**Role:** Handles existing patients asking about their medication schedule.
+**Tool calls:** `get_prescription`, `translate_text`, `log_query`, `mark_reminder_sent`
 
-**Sarvam APIs used:** sarvam-30b (medical Q&A), Bulbul v3 TTS, Mayura v1 Translate
-
-**Tool calls:**
-- `get_prescription(patient_id: str) -> dict` — queries Supabase prescriptions table; raises `ValueError` if no prescription on file
-- `translate_text(text: str, source_lang: str, target_lang: str) -> str` — translates doctor notes from English
-- `log_query(patient_id: str, query: str, response: str) -> None` — logs to Supabase call_logs
-- `mark_reminder_sent(patient_id: str) -> None` — marks outbound reminder as sent in Supabase (outbound node only)
-
-**System prompt (core logic):**
-
-```
-You are the prescription assistant for a hospital. The patient speaks {lang_code}.
-
-Available tools: get_prescription, translate_text, log_query
-
-Workflow:
-1. Call get_prescription(patient_id) — if it raises ValueError (no prescription on file),
-   escalate immediately with a translated apology message.
-2. The prescription contains: medicines (JSON array), notes_en (English text), refill_date
-3. Translate notes_en to {lang_code} using translate_text
-4. Read out the medication schedule in the patient's language
-5. Answer any follow-up questions: "can I take with food?", "what are the side effects?", "when to refill?"
-
-LLM decision object fields: reply (text to speak), escalate (bool)
-
-Rules:
-- Doctor notes are ALWAYS in English. You MUST translate them before reading to the patient.
-- DO NOT give medical advice beyond what's in the prescription. For anything beyond the prescription,
-  set escalate=true — the node escalates to human handoff automatically.
-- Log every query-response pair via log_query for doctor review.
-- All responses in {lang_code}
-```
-
-**Outbound variant (Agent 4 outbound — `prescription_outbound_node`):**
-- Called by cron for medication reminders
-- Fetches prescription via `get_prescription`; if no prescription found, logs `reminder_sent: False` and exits gracefully (no escalation)
-- Script translated to patient's language: "This is a reminder call about your medication: [medicine names]. Please take it as prescribed."
-- Calls `mark_reminder_sent(patient_id)` after delivering the script
-- Sets `call_outcome: {"reminder_sent": True}` on success
+No changes. See previous version for full system prompt and tool call details.
 
 ---
 
-### Agent 5 — Post-Discharge Follow-up (`agent_followup.py`)
+### Agent 5 — Post-Discharge Follow-up (`agent_followup.py`) — UNCHANGED
 
-**Role:** Outbound only. Calls discharged patients at 24h/72h to check recovery status.
+**Tool calls:** `get_discharge_info`, `log_outcome`, `escalate_to_doctor`
 
-**Sarvam APIs used:** All four — STT (listen to patient), LLM (reason about symptoms), TTS (speak checklist), Translate (notes to regional lang)
+No changes. See previous version for full system prompt and tool call details.
+
+---
+
+### Agent 6 — Lab Status (`agent_lab_status.py`) — NEW
+
+**Role:** Looks up lab/diagnostic report status for a patient. Pure lookup — no LLM reasoning.
+
+**Pattern used:** NOT Tool-Calling/ReAct. This agent calls ONE predetermined tool, translates the result, speaks it. No LLM decision about which tool to call.
+
+**Sarvam APIs used:** Translate (Mayura v1) + TTS (Bulbul v3) only. No LLM call.
 
 **Tool calls:**
-- `get_discharge_info(patient_id: str) -> dict` — queries Supabase discharge_followups
-- `log_outcome(patient_id: str, outcome: dict) -> None` — writes structured outcome to Supabase
-- `escalate_to_doctor(patient_id: str, reason: str) -> None` — fires Slack webhook + SMS to on-call doctor
+- `get_lab_status(patient_id: str) -> list[dict]` — returns all ready/pending reports
+- `mark_report_dispatched(report_id: str) -> None` — flips status to 'dispatched' after reading
 
-**System prompt (core logic):**
-
-```
-You are the post-discharge follow-up agent. You are calling a patient who was discharged from the hospital.
-The patient speaks {lang_code}. This is an OUTBOUND call — YOU initiate.
-
-Available tools: get_discharge_info, log_outcome, escalate_to_doctor
-
-Workflow:
-1. Call get_discharge_info(patient_id) to know: discharge_date, diagnosis, medications_prescribed
-2. Greet the patient in their language: "Namaste, main [hospital name] se bol raha hoon..."
-3. Ask the structured symptom checklist:
-   a. "Aapko bukhaar toh nahi hai?" → fever: yes/no
-   b. "Dard ka level 1 se 10 mein kitna hai?" → pain_level: 1-10
-   c. "Kya aap apni dawai le rahe hain?" → medication_adherence: yes/no/partial
-   d. "Koi aur problem toh nahi hai?" → additional_concerns: free text
-4. Compute readmission_risk:
-   - fever=yes OR pain_level>7 OR medication_adherence=no → risk = 0.8
-   - pain_level 4-7 AND medication_adherence=partial → risk = 0.5
-   - All normal → risk = 0.2
-5. Call log_outcome with structured JSON: {fever, pain_level, medication_adherence, additional_concerns, readmission_risk}
-6. If readmission_risk > 0.7 → call escalate_to_doctor
-
-Rules:
-- Be empathetic. The patient is recovering. Speak slowly and clearly.
-- If the patient is unresponsive or the call goes to voicemail, log outcome as "unreachable" and retry in 4 hours.
-- All conversation in {lang_code}.
-```
-
-**Structured output:**
+**Implementation:**
 
 ```python
-class FollowupOutcome(TypedDict):
-    fever: bool
-    pain_level: int               # 1-10
-    medication_adherence: str     # "yes" | "no" | "partial"
-    additional_concerns: str
-    readmission_risk: float       # 0.0-1.0
-    status: str                   # "completed" | "unreachable" | "escalated"
+async def lab_status_node(state: AgentState) -> AgentState:
+    state["current_agent"] = "lab_status"
+
+    reports = await get_lab_status(state["patient_id"])
+
+    if not reports:
+        # No reports on file — speak apology + escalate is NOT needed, just inform
+        message = await translate_text(
+            "No lab reports are currently on file for you. Please contact the lab counter.",
+            source_lang="en-IN", target_lang=state["lang_code"]
+        )
+        state["messages"].append({"role": "assistant", "content": message})
+        return state
+
+    # Filter: only read READY reports that haven't been dispatched yet
+    ready = [r for r in reports if r["status"] == "ready"]
+    pending = [r for r in reports if r["status"] == "pending"]
+
+    if ready:
+        # Read each ready report's result_summary_en translated to patient's language
+        for report in ready:
+            translated_summary = await translate_text(
+                report["result_summary_en"],
+                source_lang="en-IN", target_lang=state["lang_code"]
+            )
+            message = f"{report['test_name']}: {translated_summary}"
+            state["messages"].append({"role": "assistant", "content": message})
+            await mark_report_dispatched(report["report_id"])
+
+    if pending:
+        # Tell patient which tests are still pending
+        test_names = ", ".join([r["test_name"] for r in pending])
+        pending_msg = await translate_text(
+            f"The following tests are still being processed: {test_names}. Please check back later.",
+            source_lang="en-IN", target_lang=state["lang_code"]
+        )
+        state["messages"].append({"role": "assistant", "content": pending_msg})
+
+    # No escalation needed unless something unexpected happens
+    return state
+```
+
+**New DB table: `lab_reports`**
+
+```python
+class LabReport(Base):
+    __tablename__ = "lab_reports"
+
+    report_id         = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    patient_id        = Column(UUID(as_uuid=True), ForeignKey("patients.id"), nullable=False, index=True)
+    test_name         = Column(String(200), nullable=False)       # "Blood CBC", "Lipid Panel", "HbA1c"
+    status            = Column(String(20), default="pending")     # "pending" | "ready" | "dispatched"
+    ordered_at        = Column(DateTime, default=datetime.utcnow)
+    ready_at          = Column(DateTime, nullable=True)
+    result_summary_en = Column(String(500), nullable=True)        # English summary — translate before TTS
+```
+
+**New tool functions to add to `db_tools.py`:**
+
+```python
+async def get_lab_status(patient_id: str) -> list[dict]:
+    """Get all pending and ready lab reports for a patient.
+    Returns [{report_id, test_name, status, ready_at, result_summary_en}]
+    Excludes 'dispatched' reports — those have already been read to the patient."""
+
+async def mark_report_dispatched(report_id: str) -> None:
+    """Mark a report as dispatched after reading it to the patient.
+    Prevents repeated read-out of the same report on subsequent calls."""
+```
+
+**Seed data to add in `seed.py`:**
+
+```python
+lab_reports = [
+    # Ready report — will be read out in demo (Ramesh Kumar, hi-IN)
+    {
+        "patient_id": patients[0]["id"],
+        "test_name": "Complete Blood Count (CBC)",
+        "status": "ready",
+        "ready_at": "2026-07-06T14:00:00",
+        "result_summary_en": "Hemoglobin is slightly low at 10.8 g/dL. All other values are within normal range. Please follow up with your doctor.",
+    },
+    # Pending report — demo shows "still processing" message (Arun Patil, mr-IN)
+    {
+        "patient_id": patients[2]["id"],
+        "test_name": "Lipid Panel",
+        "status": "pending",
+        "ready_at": None,
+        "result_summary_en": None,
+    },
+    # Already dispatched — should NOT appear in demo (to verify filtering)
+    {
+        "patient_id": patients[0]["id"],
+        "test_name": "Blood Glucose",
+        "status": "dispatched",
+        "ready_at": "2026-07-05T09:00:00",
+        "result_summary_en": "Blood glucose is 98 mg/dL, within normal fasting range.",
+    },
+]
 ```
 
 ---
 
-## LiveKit Integration — `voice/livekit_agent.py`
+### Agent 7 — Billing (`agent_billing.py`) — NEW
 
-This file bridges LiveKit's audio stream to the LangGraph graph.
+**Role:** Reads outstanding bill amount and dispatches UPI payment link via SMS. Pure lookup — no LLM reasoning.
 
-**Critical config — use EXACTLY these settings:**
+**Pattern used:** NOT Tool-Calling/ReAct. Calls two predetermined tools in sequence. No LLM decision.
+
+**Sarvam APIs used:** Translate (Mayura v1) + TTS (Bulbul v3) only. No LLM call.
+
+**Tool calls:**
+- `get_bill(patient_id: str) -> dict | None` — most recent unpaid bill
+- `dispatch_payment_link(bill_id: str, phone: str) -> None` — sends UPI link via Twilio SMS
+
+**Implementation:**
+
+```python
+async def billing_node(state: AgentState) -> AgentState:
+    state["current_agent"] = "billing"
+
+    bill = await get_bill(state["patient_id"])
+
+    if not bill:
+        message = await translate_text(
+            "No outstanding bills found for your account.",
+            source_lang="en-IN", target_lang=state["lang_code"]
+        )
+        state["messages"].append({"role": "assistant", "content": message})
+        return state
+
+    # Format amount in Indian numbering (₹3,200)
+    amount_str = f"₹{bill['amount_due']:,.0f}"
+
+    # Translate bill summary to patient's language
+    bill_summary_en = f"Your outstanding bill is {amount_str}."
+    if bill.get("items_json"):
+        items = ", ".join([f"{i['desc']} ({i['amount']})" for i in bill["items_json"][:3]])
+        bill_summary_en += f" This includes: {items}."
+
+    translated = await translate_text(bill_summary_en, source_lang="en-IN", target_lang=state["lang_code"])
+    state["messages"].append({"role": "assistant", "content": translated})
+
+    # Always dispatch payment link via SMS — patient always gets it after hearing the amount
+    # No need to ask — this is the primary resolution action for billing intent
+    if bill.get("payment_link") and state.get("patient_id"):
+        patient = await get_patient_record_by_id(state["patient_id"])
+        await dispatch_payment_link(bill["bill_id"], patient["phone"])
+
+        link_msg = await translate_text(
+            "A payment link has been sent to your registered mobile number.",
+            source_lang="en-IN", target_lang=state["lang_code"]
+        )
+        state["messages"].append({"role": "assistant", "content": link_msg})
+
+    return state
+```
+
+**Design decision: payment link is always dispatched automatically.**
+No confirmation prompt needed — when a patient calls about their bill, the payment link
+is the primary resolution. Asking "kya aap link chahte hain?" adds a turn without value.
+
+**New DB table: `bills`**
+
+```python
+class Bill(Base):
+    __tablename__ = "bills"
+
+    bill_id      = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    patient_id   = Column(UUID(as_uuid=True), ForeignKey("patients.id"), nullable=False, index=True)
+    amount_due   = Column(Numeric(10, 2), nullable=False)
+    status       = Column(String(20), default="unpaid")      # "unpaid" | "partial" | "paid"
+    items_json   = Column(JSON, default=list)                # [{desc, qty, amount}]
+    payment_link = Column(Text, nullable=True)               # UPI deep link
+    created_at   = Column(DateTime, default=datetime.utcnow)
+```
+
+**New tool functions to add to `db_tools.py`:**
+
+```python
+async def get_bill(patient_id: str) -> dict | None:
+    """Get most recent unpaid/partial bill for a patient.
+    Returns {bill_id, amount_due, status, items_json, payment_link} or None."""
+
+async def dispatch_payment_link(bill_id: str, phone: str) -> None:
+    """Send UPI payment link to patient's phone via Twilio SMS.
+    Reuses send_sms() from notification_tools.py — no new infra."""
+```
+
+**`dispatch_payment_link` implementation:**
+
+```python
+async def dispatch_payment_link(bill_id: str, phone: str) -> None:
+    bill = await get_bill_by_id(bill_id)
+    message = f"Pay your hospital bill of ₹{bill['amount_due']:.0f} here: {bill['payment_link']}\n— Hospital Receptionist"
+    await send_sms(phone, message)  # reuses existing send_sms() from notification_tools.py
+```
+
+**Seed data to add in `seed.py`:**
+
+```python
+bills = [
+    # Unpaid bill — demo reads amount + dispatches link (Sunita Devi, hi-IN)
+    {
+        "patient_id": patients[1]["id"],
+        "amount_due": 3200.00,
+        "status": "unpaid",
+        "items_json": [
+            {"desc": "OPD Consultation", "qty": 1, "amount": 500},
+            {"desc": "Blood CBC Test", "qty": 1, "amount": 700},
+            {"desc": "Medicines", "qty": 1, "amount": 2000},
+        ],
+        "payment_link": "upi://pay?pa=hospital@okaxis&am=3200&cu=INR&tn=HospitalBill",
+    },
+    # Paid bill — should NOT appear in demo (verify get_bill filters correctly)
+    {
+        "patient_id": patients[3]["id"],
+        "amount_due": 1500.00,
+        "status": "paid",
+        "items_json": [{"desc": "OPD Consultation", "qty": 1, "amount": 1500}],
+        "payment_link": None,
+    },
+]
+```
+
+---
+
+## LiveKit Integration — `voice/livekit_agent.py` — UNCHANGED
+
+Critical config — use EXACTLY these settings:
 
 ```python
 from livekit.agents import AgentSession
 from livekit.plugins import sarvam
 
 stt = sarvam.STT(
-    language="unknown",         # REQUIRED — auto-detect, never hardcode
+    language="unknown",    # REQUIRED — auto-detect, never hardcode
     model="saaras:v3",
     mode="transcribe",
-    flush_signal=True           # REQUIRED — proper turn detection
+    flush_signal=True      # REQUIRED — proper turn detection
 )
 
 llm = sarvam.LLM(model="sarvam-30b")  # NOT 105b — latency matters
@@ -571,276 +677,168 @@ session = AgentSession(
 # DO NOT pass vad= to AgentSession — Sarvam handles this internally
 ```
 
-**How the session loop works:**
-
 ```python
 async def on_message(message: str, state: AgentState):
-    """Called by LiveKit when STT produces a transcription."""
-    # 1. Append user message to state
     state["messages"].append({"role": "user", "content": message})
-
-    # 2. Run one step of the LangGraph graph
     result = await inbound_graph.ainvoke(state)
-
-    # 3. Get the assistant's response from the updated messages
     assistant_message = result["messages"][-1]["content"]
-
-    # 4. TTS speaks the response (LiveKit handles audio routing)
     return assistant_message
 ```
-
-**Important:** The LangGraph graph runs ONE FULL PASS per user utterance. It doesn't stream token-by-token to the patient during graph execution — it completes the graph traversal, produces a final response, and TTS speaks it. This is by design: the patient hears a complete, coherent sentence, not fragments.
 
 ---
 
 ## Tool Functions — `agents/tools/`
 
-### `language_config.py` — Language config loader
+### `language_config.py` — UNCHANGED
 
 ```python
 def load_language_config(lang_code: str) -> dict:
-    """Load tts_voice, tts_model, greeting from config/languages.yaml for the given lang_code.
-    Used by Agent 1 to set voice persona after language detection."""
+    """Load tts_voice, tts_model, greeting from config/languages.yaml."""
 ```
 
-### `llm_json.py` — LLM response parser
+### `llm_json.py` — UNCHANGED
 
 ```python
 def extract_json(text: str) -> dict | None:
     """Parse the first JSON object found in an LLM reply string.
-    Returns None if the reply is plain text (a conversational clarification).
-    All agents use this to handle cases where the model responds conversationally
-    instead of outputting pure JSON."""
+    Returns None if the reply is plain text (a conversational clarification)."""
 ```
 
-### `db_tools.py` — Supabase operations
+### `db_tools.py` — UPDATED (new functions appended, nothing removed)
+
+All existing functions from previous version remain unchanged. New additions:
 
 ```python
-# All functions use the Supabase Python client (supabase-py)
-# Connection is initialized once in api/database.py and imported here
+# ── Existing functions (ALL UNCHANGED) ──
+async def get_patient_record(phone: str) -> dict | None: ...
+async def register_patient(name: str, phone: str, age: int, lang_pref: str) -> str: ...
+async def check_available_slots(department: str, date: str) -> list[dict]: ...
+async def get_next_available(department: str, n: int = 3) -> list[dict]: ...
+async def book_slot(patient_id: str, slot_id: str) -> dict: ...
+async def cancel_appointment(appointment_id: str) -> bool: ...
+async def confirm_appointment(appointment_id: str) -> None: ...
+async def get_prescription(patient_id: str) -> dict: ...        # raises ValueError if not found
+async def mark_reminder_sent(patient_id: str) -> None: ...
+async def get_discharge_info(patient_id: str) -> dict: ...      # raises ValueError if not found
+async def log_outcome(patient_id: str, outcome: dict) -> None: ...
+async def log_query(patient_id: str, query: str, response: str) -> None: ...
+async def get_due_outbound_jobs() -> list[dict]: ...
 
-async def get_patient_record(phone: str) -> dict | None:
-    """Look up patient by phone number. Returns patient dict or None."""
+# ── NEW functions for Agent 6 (Lab Status) ──
+async def get_lab_status(patient_id: str) -> list[dict]:
+    """Get all 'pending' and 'ready' lab reports for a patient.
+    Excludes 'dispatched' reports — already delivered.
+    Returns [{report_id, test_name, status, ready_at, result_summary_en}]"""
 
-async def register_patient(name: str, phone: str, age: int, lang_pref: str) -> str:
-    """Create new patient in Supabase. Returns patient_id (UUID)."""
+async def mark_report_dispatched(report_id: str) -> None:
+    """Flip lab_reports.status from 'ready' to 'dispatched'.
+    Prevents re-reading the same report on the next call."""
 
-async def check_available_slots(department: str, date: str) -> list[dict]:
-    """Query appointments table for open slots. Returns list of {slot_id, doctor_name, time, department}."""
+# ── NEW functions for Agent 7 (Billing) ──
+async def get_bill(patient_id: str) -> dict | None:
+    """Get most recent unpaid or partial bill for a patient.
+    Returns {bill_id, amount_due, status, items_json, payment_link} or None.
+    Filters: status IN ('unpaid', 'partial'), orders by created_at DESC, LIMIT 1."""
 
-async def get_next_available(department: str, n: int = 3) -> list[dict]:
-    """If no slots on requested date, get next N available across all dates."""
+async def get_bill_by_id(bill_id: str) -> dict:
+    """Get a specific bill by bill_id. Used by dispatch_payment_link."""
 
-async def book_slot(patient_id: str, slot_id: str) -> dict:
-    """Book an appointment. Updates slot status to 'booked'. Returns confirmation dict."""
-
-async def cancel_appointment(appointment_id: str) -> bool:
-    """Cancel an appointment. Updates status to 'cancelled'."""
-
-async def confirm_appointment(appointment_id: str) -> None:
-    """Mark appointment as confirmed (used by outbound scheduler confirmation calls)."""
-
-async def get_prescription(patient_id: str) -> dict:
-    """Get most recent prescription for a patient. Returns {medicines, notes_en, refill_date}.
-    Raises ValueError if no prescription exists."""
-
-async def mark_reminder_sent(patient_id: str) -> None:
-    """Mark medication reminder as sent in Supabase (used by outbound prescription node)."""
-
-async def get_discharge_info(patient_id: str) -> dict:
-    """Get discharge info for follow-up. Returns {discharge_date, diagnosis, medications}.
-    Raises ValueError if no discharge record exists."""
-
-async def log_outcome(patient_id: str, outcome: dict) -> None:
-    """Write follow-up outcome to discharge_followups table."""
-
-async def log_query(patient_id: str, query: str, response: str) -> None:
-    """Log a prescription query-response pair to call_logs for doctor review."""
-
-async def get_due_outbound_jobs() -> list[dict]:
-    """Query discharge_followups and appointments for due outbound jobs. Called by cron."""
+async def dispatch_payment_link(bill_id: str, phone: str) -> None:
+    """Fetch bill, format SMS message with UPI link, call send_sms().
+    Reuses existing send_sms() from notification_tools.py — no new infra."""
 ```
 
-### `redis_tools.py` — Upstash Redis operations
+### `redis_tools.py` — UNCHANGED
+
+All three key patterns preserved. No changes.
 
 ```python
-# Uses upstash-redis Python client (HTTP-based, works everywhere)
-
-from upstash_redis import Redis
-
-redis = Redis(url=UPSTASH_REDIS_REST_URL, token=UPSTASH_REDIS_REST_TOKEN)
-
-async def redis_get(key: str) -> str | None:
-    """Get a value from Upstash Redis."""
-    return await redis.get(key)
-
-async def redis_set(key: str, value: str, ttl_seconds: int) -> None:
-    """Set a value with TTL in Upstash Redis."""
-    await redis.set(key, value, ex=ttl_seconds)
-
-async def save_call_summary(patient_id: str, summary: str) -> None:
-    """Append call summary to recent_calls list (max 5, TTL 7 days)."""
-    key = f"recent_calls:{patient_id}"
-    await redis.lpush(key, summary)
-    await redis.ltrim(key, 0, 4)  # Keep last 5
-    await redis.expire(key, 7 * 24 * 3600)  # 7 days
-
-async def save_session_state(call_id: str, state_json: str) -> None:
-    """Save call state snapshot for crash recovery (TTL 30 min)."""
-    await redis.set(f"session:{call_id}", state_json, ex=1800)
-
-async def save_lang_preference(patient_id: str, lang_code: str) -> None:
-    """Cache patient's language preference (TTL 90 days)."""
-    await redis.set(f"lang_pref:{patient_id}", lang_code, ex=90 * 24 * 3600)
-
-async def get_recent_calls(patient_id: str) -> list[str]:
-    """Get last 5 call summaries for context."""
-    return await redis.lrange(f"recent_calls:{patient_id}", 0, 4)
+# Key patterns (unchanged):
+# recent_calls:{patient_id}  — TTL 7 days
+# session:{session_id}       — TTL 30 min
+# lang_pref:{patient_id}     — TTL 90 days
 ```
 
-### `translate_tools.py` — Sarvam Translate wrapper
+### `translate_tools.py` — UNCHANGED
 
 ```python
-from sarvamai import SarvamAI
-
-client = SarvamAI(api_subscription_key=SARVAM_API_KEY)
-
 async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
-    """Translate text using Sarvam Mayura v1.
-    Primary use: doctor notes (en-IN) → patient language (hi-IN, mr-IN)."""
-    response = client.text.translate(
-        input=text,
-        source_language_code=source_lang,
-        target_language_code=target_lang,
-    )
-    return response.translated_text
+    """Sarvam Mayura v1. Primary use: EN → hi-IN / mr-IN."""
 ```
 
-### `notification_tools.py` — Slack + SMS
+### `notification_tools.py` — UNCHANGED
+
+`send_sms()` is reused by `dispatch_payment_link()` — no changes needed to this file.
+
+---
+
+## Post-Call Subgraph — `analytics/call_analytics.py` — UNCHANGED
+
+No changes needed. The post-call node already handles `intent == "book"` for scheduling outbound jobs.
+Lab and billing calls do not trigger outbound jobs, so no new branches are needed.
 
 ```python
-import httpx
-from twilio.rest import Client
-
-async def send_slack_alert(message: str) -> None:
-    """Send escalation alert to Slack channel via webhook."""
-    async with httpx.AsyncClient() as client:
-        await client.post(SLACK_WEBHOOK_URL, json={"text": message})
-
-async def send_sms(phone: str, message: str) -> None:
-    """Send SMS via Twilio."""
-    twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    twilio_client.messages.create(
-        body=message,
-        from_=TWILIO_PHONE_NUMBER,
-        to=phone,
-    )
-
-async def escalate_to_doctor(patient_id: str, reason: str) -> None:
-    """Fire both Slack alert and SMS to on-call doctor."""
-    patient = await get_patient_record_by_id(patient_id)
-    message = f"🚨 ESCALATION: Patient {patient['name']} (ID: {patient_id})\nReason: {reason}\nLang: {patient['lang_pref']}\nPhone: {patient['phone']}"
-    await send_slack_alert(message)
-    # SMS to on-call doctor (hardcoded for demo, would be from a roster table in production)
-    await send_sms(ON_CALL_DOCTOR_PHONE, message)
+# post_call_node fires after ALL specialist agents including A6 and A7
+# For lab/billing calls: saves call summary to Redis, lang_pref to Redis,
+# runs batch STT analytics, writes to call_logs — same as A3/A4 calls.
+# No new conditional branches needed.
 ```
 
 ---
 
-## Post-Call Subgraph — `analytics/call_analytics.py`
+## Guardrails — `voice/livekit_agent.py`
 
-Runs after every inbound call completes. This is a LangGraph node, not a separate graph.
+**Guardrails run at the LiveKit session layer, NOT inside the LangGraph graph.**
+This means they fire even if the graph crashes mid-execution.
+
+### Input guardrails (fire BEFORE graph.ainvoke)
 
 ```python
-async def post_call_node(state: AgentState) -> AgentState:
-    """Post-call analytics: Batch STT + diarization + sarvam-30b analysis."""
-    state["current_agent"] = "post_call"
+# 1. Emergency detection — hard block, bypasses all agents
+EMERGENCY_KEYWORDS = {
+    "hi-IN": ["दिल का दौरा", "सांस नहीं", "बेहोश", "ब्रेन स्ट्रोक"],
+    "mr-IN": ["हृदयविकाराचा झटका", "श्वास नाही", "बेशुद्ध"],
+    "en-IN": ["heart attack", "not breathing", "unconscious", "stroke"],
+}
+# If any keyword matches → speak emergency number immediately → set escalation_required=True
 
-    # 1. Save call summary to Redis (Layer 2)
-    summary = generate_call_summary(state["messages"])
-    await save_call_summary(state["patient_id"], summary)
+# 2. STT confidence check — soft block
+# If stt.confidence < 0.3 AND duration < 1s → ask patient to speak again (max 3 retries)
 
-    # 2. Save language preference to Redis (Layer 2)
-    await save_lang_preference(state["patient_id"], state["lang_code"])
-
-    # 3. Run Sarvam Batch STT + Diarization on the recording
-    if state.get("call_recording_path"):
-        transcript = await sarvam_batch_stt(
-            audio_path=state["call_recording_path"],
-            model="saaras:v3",
-            with_diarization=True,
-        )
-
-        # 4. Run sarvam-30b analysis on the diarized transcript
-        analysis = await sarvam_analyze_call(
-            transcript=transcript,
-            analysis_points=[
-                "sentiment_score",        # -1.0 to 1.0
-                "issue_resolved",         # bool
-                "agent_talk_time_pct",    # 0-100
-                "patient_talk_time_pct",  # 0-100
-                "call_duration_sec",
-                "key_topics",             # list of strings
-            ]
-        )
-
-        # 5. Write to Supabase call_logs
-        await save_call_log(
-            patient_id=state["patient_id"],
-            call_id=state["call_id"],
-            recording_path=state["call_recording_path"],
-            analytics_json=analysis,
-            duration=analysis.get("call_duration_sec"),
-            outcome=state.get("call_outcome"),
-        )
-
-    # 6. If this was a booking, schedule outbound confirmation at +2h
-    if state.get("intent") == "book":
-        await schedule_outbound_job(
-            patient_id=state["patient_id"],
-            job_type="confirmation",
-            due_at=now() + timedelta(hours=2),
-        )
-
-    # 7. Check if patient has a recent discharge — schedule follow-up
-    discharge = await get_pending_discharge(state["patient_id"])
-    if discharge and discharge["status"] == "pending":
-        await schedule_outbound_job(
-            patient_id=state["patient_id"],
-            job_type="followup",
-            due_at=discharge["due_at"],
-        )
-
-    return {**state, "call_outcome": analysis}
+# 3. Unsupported language — soft block
+# If Language ID returns lang not in languages.yaml after 3 utterances → human_handoff
 ```
 
----
+### Output guardrails (fire AFTER graph.ainvoke, BEFORE TTS)
 
-## Testing Checklist
+```python
+# 4. Language consistency check
+# Run Sarvam Language ID on LLM output
+# If detected lang ≠ state.lang_code → discard, retry with explicit instruction (max 2 retries)
 
-Before deploying, verify each agent works in isolation:
+# 5. Medical boundary check (Agent 4 outputs only)
+MEDICAL_ADVICE_PATTERNS = ["you should take", "increase dosage", "stop medication", "avoid this medicine"]
+# If pattern detected → discard → replace with "please consult your doctor" → escalate
 
-1. **Agent 1:** Feed it a Hindi utterance → should return `lang_code="hi-IN"`, `tts_voice="priya"`
-2. **Agent 1:** Feed it Marathi → should return `lang_code="mr-IN"`, `tts_voice="kavya"`
-3. **Agent 1:** Repeat caller with cached `lang_pref` in Redis → should skip detection entirely
-4. **Agent 2:** New patient (phone not in DB) → should call `register_patient` silently, no audible pause
-5. **Agent 2:** Patient states intent only (no phone) → `intake_collected.intent` locked in; next turn with phone number only → proceeds to DB lookup without re-asking intent
-6. **Agent 2:** Ambiguous intent → should ask clarifying question, max 3 rounds; `intake_collected` accumulates partial fields across rounds
-6. **Agent 3:** Request slot on a full day → should offer 3 alternatives via `get_next_available`
-7. **Agent 3:** Book → cancel → rebook → verify DB state is consistent
-8. **Agent 4:** Get prescription → verify `notes_en` is translated to patient's `lang_code`
-9. **Agent 5:** Follow-up with `pain_level=8` → should set `readmission_risk=0.8` → escalate
-10. **Post-call:** Verify Redis gets the call summary, Supabase gets the analytics JSON
+# 6. TTS length cap
+# If response > 300 chars → summarise before TTS
+# Log original response to Supabase for review
+
+# 7. PII scrub before logging
+# Redact phone numbers, aadhaar patterns, DOB from call_logs
+# Store patient_id FK instead of raw PII in analytics tables
+```
 
 ---
 
 ## Observability — LangSmith
 
-**Why LangSmith:** LangGraph is built by LangChain. Every `graph.ainvoke()` call is auto-traced with zero instrumentation code — each node (language_router → voice_intake → scheduler → post_call) becomes a child span automatically. STT and TTS require thin subclass wrappers in `voice/livekit_agent.py`.
+**Why LangSmith:** LangGraph auto-instruments every `graph.ainvoke()` call with zero code changes.
+Each node (language_router → voice_intake → lab_status → post_call) becomes a child span automatically.
 
-**Free tier:** 5,000 traces/month. 1 trace = 1 `graph.ainvoke()` call (≈ 1 patient utterance). Sufficient for demo load (~27 full conversations/day). At real clinic scale (50+ calls/day) the $39/month tier (50K traces) is needed.
+**Free tier:** 5,000 traces/month. Sufficient for demo (≈1 trace per patient utterance).
 
-### Environment variables
+### Setup — environment variables only, no code changes to agents
 
 ```bash
 LANGCHAIN_TRACING_V2=true          # set false to disable without code change
@@ -848,27 +846,23 @@ LANGCHAIN_API_KEY=sk-lc-...
 LANGCHAIN_PROJECT=hospital-receptionist
 ```
 
-Setting these env vars is sufficient to enable LangGraph auto-tracing. No code changes needed in agent files.
+### What is traced automatically
 
-### What is traced automatically (zero code)
-
-Every `inbound_graph.ainvoke(state, config={"metadata": {"session_id": ..., "call_id": ...}})` produces one **trace** in LangSmith:
+Every `inbound_graph.ainvoke(state, config={"metadata": {"session_id": ..., "call_id": ...}})`:
 
 ```
 Trace  (searchable by session_id)
-  ├── Run: language_router      latency, input/output state
-  ├── Run: voice_intake         latency, input/output state
-  │     └── LLM: sarvam-30b    prompt tokens, completion tokens, latency
-  ├── Run: scheduler            latency, input/output state
-  │     └── LLM: sarvam-30b    prompt tokens, completion tokens, latency
-  └── Run: post_call            latency, input/output state
+  ├── Run: language_router        latency, input/output state
+  ├── Run: voice_intake           latency, input/output state
+  │     └── LLM: sarvam-30b      prompt tokens, completion tokens, latency
+  ├── Run: lab_status             latency, input/output state   ← NEW, traced automatically
+  │     (no LLM child — pure tool call)
+  ├── Run: billing                latency, input/output state   ← NEW, traced automatically
+  │     (no LLM child — pure tool call)
+  └── Run: post_call              latency, input/output state
 ```
 
-`session_id` is passed as LangSmith metadata on every `ainvoke()` so all turns of one patient conversation are groupable in the UI.
-
-### STT and TTS spans
-
-STT and TTS happen outside the LangGraph graph in `voice/livekit_agent.py`. They are wrapped via thin subclasses `_TracedSTT` and `_TracedTTS` that call `langsmith.trace()` around each `recognize()` / `synthesize()` call:
+### STT and TTS spans — thin wrappers in `livekit_agent.py`
 
 ```python
 with ls_trace("stt", metadata={"session_id": ..., "model": "saaras:v3", "operation": "stt"}):
@@ -878,28 +872,46 @@ with ls_trace("tts", metadata={"session_id": ..., "model": "bulbul:v3", "char_co
     return await super().synthesize(text, ...)
 ```
 
-### Metrics visible in LangSmith UI
-
-| Metric | How captured |
-|---|---|
-| LLM call count per session | Count of LLM child runs under each trace |
-| LLM latency per agent | Automatically on every LLM child run |
-| LLM token usage | Automatically (input + output tokens per call) |
-| Per-node latency | Automatically per LangGraph node |
-| STT latency | `_TracedSTT.recognize()` span |
-| TTS latency | `_TracedTTS.synthesize()` span |
-| End-to-end turn latency | Trace start → last node end |
-
-### Files changed
+### Files changed for observability
 
 | File | Change |
 |---|---|
-| `.env.example` | Added 3 LangSmith env vars |
-| `requirements.txt` | Added `langsmith>=0.1.0` |
+| `.env.example` | 3 LangSmith env vars |
+| `requirements.txt` | `langsmith>=0.1.0` |
 | `voice/livekit_agent.py` | `_TracedSTT` + `_TracedTTS` subclasses; `session_id` in `ainvoke` metadata |
-| `test_cli.py` | `session_id` passed as metadata on every `ainvoke` call |
+| `agents/agent_lab_status.py` | No changes needed — auto-traced |
+| `agents/agent_billing.py` | No changes needed — auto-traced |
 
-No changes to any agent files — LangGraph auto-instruments them via env vars.
+---
+
+## Testing Checklist
+
+### Existing agents (unchanged behavior — verify nothing broke)
+
+1. **Agent 1:** Hindi utterance → `lang_code="hi-IN"`, `tts_voice="priya"`
+2. **Agent 1:** Marathi → `lang_code="mr-IN"`, `tts_voice="kavya"`
+3. **Agent 1:** Repeat caller with cached `lang_pref` → skips detection entirely
+4. **Agent 2:** New patient → `register_patient` called silently, no audible pause
+5. **Agent 2:** Patient states intent only (no phone) → `intake_collected.intent` locked in; next turn with phone → proceeds without re-asking
+6. **Agent 2:** Ambiguous intent → clarifying question, max 3 rounds
+7. **Agent 3:** Full day requested → 3 alternatives via `get_next_available`
+8. **Agent 3:** Book → cancel → rebook → DB state consistent
+9. **Agent 4:** Prescription → `notes_en` translated to `lang_code`
+10. **Agent 5:** `pain_level=8` → `readmission_risk=0.8` → escalate
+11. **Post-call:** Redis gets call summary, Supabase gets analytics JSON
+
+### New agents (Agent 6 and Agent 7)
+
+12. **Agent 6 — ready report:** Patient with `report_id` in "ready" status → result_summary_en translated → spoken → `mark_report_dispatched` called → status flips to "dispatched"
+13. **Agent 6 — pending only:** Patient with only "pending" reports → "still processing" message in their language
+14. **Agent 6 — no reports:** Patient with no lab_reports rows → "no reports on file" message, no escalation
+15. **Agent 6 — repeat call:** Patient calls again after report dispatched → "dispatched" row filtered out → treated as "no reports" (verify `get_lab_status` excludes "dispatched")
+16. **Agent 7 — unpaid bill:** Patient with unpaid bill → amount spoken in language → UPI link SMS dispatched to patient phone
+17. **Agent 7 — no bill:** Patient with no unpaid bills → "no outstanding bills" message
+18. **Agent 7 — paid bill:** Patient whose only bill has `status="paid"` → same as "no bill" (verify `get_bill` filters correctly)
+19. **Router — lab intent:** Utterance "meri report aayi kya" → Agent 2 extracts `intent="lab"` → `route_after_intake` returns `"lab_status"` → Agent 6 runs
+20. **Router — billing intent:** Utterance "mera bill kitna hai" → Agent 2 extracts `intent="billing"` → `route_after_intake` returns `"billing"` → Agent 7 runs
+21. **Escalation path — A6/A7:** Manually set `escalation_required=True` in lab_status_node → verify `check_escalation` routes to `human_handoff` → Slack webhook fires
 
 ---
 

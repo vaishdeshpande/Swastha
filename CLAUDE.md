@@ -17,7 +17,7 @@ code-mixed Hinglish/Marathlish. The system:
 1. Detects their language automatically
 2. Registers them silently if they're new
 3. Routes to the right agent based on intent
-4. Books appointments, answers prescription queries, or follows up post-discharge
+4. Books appointments, answers prescription queries, checks lab reports, reads bills, or follows up post-discharge
 5. Confirms in the patient's language via TTS
 6. Runs post-call analytics (sentiment, resolution, talk-time)
 7. Triggers outbound follow-up calls at 24h/72h via a cron-driven LangGraph subgraph
@@ -74,6 +74,8 @@ hospital-receptionist/
 │   ├── agent_scheduler.py            # Agent 3 (inbound + outbound)
 │   ├── agent_prescription.py         # Agent 4 (inbound + outbound)
 │   ├── agent_followup.py             # Agent 5 (outbound only)
+│   ├── agent_lab_status.py           # Agent 6 — inbound, lab report lookup
+│   ├── agent_billing.py              # Agent 7 — inbound, bill + UPI dispatch
 │   ├── prompts/                      # System prompts per agent per language
 │   │   ├── language_router.py
 │   │   ├── voice_intake.py
@@ -81,10 +83,12 @@ hospital-receptionist/
 │   │   ├── prescription.py
 │   │   └── followup.py
 │   └── tools/
-│       ├── db_tools.py               # get_patient, check_slots, book_slot, etc.
-│       ├── redis_tools.py            # Upstash Redis read/write helpers
+│       ├── db_tools.py               # get_patient, check_slots, book_slot, get_lab_status, get_bill, etc.
+│       ├── redis_tools.py            # Upstash Redis read/write helpers + slot_cache pre-fetch
 │       ├── translate_tools.py        # Sarvam Translate API wrappers
-│       └── notification_tools.py     # Slack webhook, SMS via Twilio
+│       ├── notification_tools.py     # Slack webhook, SMS via Twilio, dispatch_payment_link
+│       ├── intent_classifier.py      # Confidence-gated parallel fanout (Scenario 4 optimization)
+│       └── language_config.py        # Load tts_voice/greeting from languages.yaml
 │
 ├── voice/
 │   ├── CLAUDE.md                     # (optional, small — can reference agents/CLAUDE.md)
@@ -99,8 +103,10 @@ hospital-receptionist/
 │   │   ├── prescriptions.py          # GET /prescriptions/{patient_id}
 │   │   ├── followup.py               # POST /followup/log
 │   │   ├── analytics.py              # GET /analytics/calls
-│   │   └── doctors.py                # GET /doctors
-│   ├── models.py                     # SQLAlchemy ORM models
+│   │   ├── doctors.py                # GET /doctors
+│   │   ├── lab.py                    # GET /lab/{patient_id}, PATCH /lab/{report_id}/dispatched
+│   │   └── billing.py                # GET /billing/{patient_id}, POST /billing/{bill_id}/dispatch-link
+│   ├── models.py                     # SQLAlchemy ORM models (8 tables)
 │   ├── database.py                   # Supabase connection via SQLAlchemy
 │   ├── redis_client.py               # Upstash Redis client setup
 │   └── seed.py                       # Seed script: 10 patients, 5 doctors, 20 slots, etc.
@@ -199,7 +205,7 @@ All agents read from this file. When you add a language, agents automatically:
 |---|---|---|---|
 | Frontend (Next.js) | Vercel | Free | Patient voice UI + /admin dashboard |
 | Backend (FastAPI + Agent Worker) | Railway | $5/mo credit | One Python process — API routes + LiveKit agent loop |
-| PostgreSQL | Supabase | Free forever | All long-term data (6 tables) |
+| PostgreSQL | Supabase | Free forever | All long-term data (8 tables — 6 original + lab_reports + bills) |
 | Redis | Upstash | Free forever | Short-term session + lang memory (3 key patterns) |
 | Voice infra | LiveKit Cloud | Free (50K min/mo) | WebRTC room + audio bridge |
 | AI APIs | Sarvam | Free (₹1K credits) | STT + LLM + TTS + Translate |
@@ -237,6 +243,11 @@ TWILIO_PHONE_NUMBER=
 
 # Slack (for escalation webhook)
 SLACK_WEBHOOK_URL=
+
+# LangSmith (LangGraph auto-tracing — set LANGCHAIN_TRACING_V2=false to disable)
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_API_KEY=
+LANGCHAIN_PROJECT=hospital-receptionist
 
 # App
 FRONTEND_URL=https://your-app.vercel.app
@@ -353,7 +364,7 @@ Use in Claude Code to test:
 
 ## Architectural Optimizations (Implemented)
 
-Four latency/quality improvements are implemented across `agents/agent_voice_intake.py`,
+Four latency/quality improvements implemented across `agents/agent_voice_intake.py`,
 `agents/agent_scheduler.py`, `agents/tools/intent_classifier.py`, and `agents/tools/redis_tools.py`.
 
 ### Scenario 1 — Parallel Background Registration
@@ -409,9 +420,9 @@ Implementation lives in `agents/tools/intent_classifier.py`.
 
 Read these before implementing their respective directories:
 
-- **`agents/CLAUDE.md`** — LangGraph graphs (inbound + outbound), all 5 agents, AgentState, tools, system prompts, conditional routing logic
-- **`api/CLAUDE.md`** — FastAPI routes, Supabase schema (SQLAlchemy), Upstash Redis patterns, seed data
-- **`frontend/CLAUDE.md`** — Next.js App Router, LiveKit React SDK, components, admin dashboard, Vercel config
+- **`agents/CLAUDE.md`** — LangGraph graphs (inbound + outbound), all 7 agents (5 original + Lab Status + Billing), AgentState, tools, system prompts, conditional routing logic, 9 agentic design patterns, observability
+- **`api/CLAUDE.md`** — FastAPI routes, Supabase schema (8 tables), Upstash Redis patterns, seed data
+- **`frontend/CLAUDE.md`** — Next.js App Router, LiveKit React SDK, neomorphic design system, talking voice assistant, admin dashboard, Vercel config
 
 ---
 

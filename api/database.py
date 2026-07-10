@@ -10,7 +10,16 @@ _raw_url = os.environ["DATABASE_URL"]
 if _raw_url.startswith("postgresql://"):
     _raw_url = _raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-engine = create_async_engine(_raw_url, echo=False)
+engine = create_async_engine(
+    _raw_url,
+    echo=False,
+    pool_pre_ping=True,          # detect stale connections before use
+    pool_recycle=300,            # recycle connections every 5 min (Supabase pooler limit)
+    connect_args={
+        "statement_cache_size": 0,       # required for Supabase PgBouncer pooler
+        "command_timeout": 10,           # cancel asyncpg queries that hang > 10s
+    },
+)
 async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

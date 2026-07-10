@@ -38,37 +38,53 @@ No mic button to hold. No typing. Pure voice conversation.
 ### `/` — Talking Voice Assistant (main page)
 
 ```
-┌────────────────────────────────────────────────────────┐
-│  🏥  Swastha AI — Hospital Voice Receptionist          │
-│                                                        │
-│  ┌──────────────────────┐  ┌────────────────────────┐  │
-│  │  PRE-CALL STATE      │  │  Agent Activity Feed   │  │
-│  │                      │  │                        │  │
-│  │  [Hindi] [Marathi]   │  │  ○ Language Router     │  │
-│  │  [Auto-detect]       │  │  ○ Voice Intake        │  │
-│  │                      │  │  ○ Scheduler           │  │
-│  │  ┌────────────────┐  │  │  ○ Prescription        │  │
-│  │  │  📞 Start Call  │  │  │  ○ Follow-up           │  │
-│  │  └────────────────┘  │  └────────────────────────┘  │
-│  └──────────────────────┘                              │
-│                                                        │
-│  ┌──────────────────────┐  ┌────────────────────────┐  │
-│  │  IN-CALL STATE       │  │  Live Transcript       │  │
-│  │                      │  │                        │  │
-│  │  ◉  Listening...     │  │  Agent: नमस्ते! मैं    │  │
-│  │  (animated waves)    │  │  आपकी क्या मदद कर     │  │
-│  │                      │  │  सकता हूँ?             │  │
-│  │  ┌────────────────┐  │  │                        │  │
-│  │  │  📵 End Call    │  │  │  Patient: मुझे        │  │
-│  │  └────────────────┘  │  │  appointment चाहिए    │  │
-│  └──────────────────────┘  └────────────────────────┘  │
-│                                                        │
-│  [ Booking confirmation card appears here on success ] │
-└────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│  ● Swastha AI                                                  │
+│    Hospital Voice Receptionist                                 │
+│                                                                │
+│  ┌──────────────────────┐  ┌───────────────────────────────┐  │
+│  │  CALL CONTROL CARD   │  │  Session | Duration | Language │  │
+│  │  (min-height 340px)  │  ├───────────────────────────────┤  │
+│  │                      │  │  Live Transcript               │  │
+│  │  [Hindi][Marathi]    │  │                                │  │
+│  │  [Auto]              │  │  Agent: नमस्ते! मैं आपकी      │  │
+│  │                      │  │  क्या मदद कर सकता हूँ?        │  │
+│  │  ▶ Start Call        │  │                                │  │
+│  │                      │  │  Patient: मुझे appointment    │  │
+│  │  ── IN-CALL ──        │  │  चाहिए                        │  │
+│  │  ◉ Listening...      │  │                                │  │
+│  │  ≋ waves             │  └───────────────────────────────┘  │
+│  │  ■ End Call          │                                      │
+│  │  simulate dropped    │                                      │
+│  │                      │                                      │
+│  │  ── ENDED ──          │                                      │
+│  │  Call Summary        │                                      │
+│  │  Duration / Language │                                      │
+│  │  Intent / Agents     │                                      │
+│  │  [Start New Call]    │                                      │
+│  └──────────────────────┘                                      │
+│                                                                │
+│  ┌──────────────────────┐  (booking card appears when booked) │
+│  │  Appointment Card    │                                      │
+│  └──────────────────────┘                                      │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-**Layout:** Two-column on desktop. Single-column stacked on mobile.
-Left column: call controls + status. Right column: agent activity + transcript.
+**Layout:** Fixed two-column grid: `300px 1fr`. No responsive breakpoint — the screen itself
+is max-width 960px and scrolls on small viewports.
+
+Left column (300px fixed):
+- Call control card: all four states (idle / in-call / ended / dropped) live in ONE card
+  with `min-height: 340px`, `flex-col items-center justify-center gap-16px text-center`
+- Booking / Lab / Bill cards appear below the call control card when agents fire those events
+
+Right column (1fr):
+- **Session bar**: Session ID (HSP-XXXX monospace) | Duration (MM:SS counter) | Language (accent color)
+- **Live Transcript**: scrollable, `height: 456px`, inset shadow
+
+The AgentActivityFeed component is NOT rendered in the main layout — the session bar +
+transcript replace it. State tracking for agents still happens in VoiceAssistant for
+future use but is not visualized on the main page.
 
 ### `/admin` — Admin Dashboard
 
@@ -244,6 +260,8 @@ export default function VoiceAssistant() {
   const [transcript, setTranscript] = useState<TranscriptMessage[]>([]);
   const [activeAgent, setActiveAgent] = useState<string | null>(null);
   const [bookingDetails, setBookingDetails] = useState<BookingDetails | null>(null);
+  const [labResults, setLabResults] = useState<LabResult[] | null>(null);   // Agent 6
+  const [billDetails, setBillDetails] = useState<BillDetails | null>(null); // Agent 7
   const callId = useRef(`hospital-${Date.now()}`);
 
   const startCall = async () => {
@@ -283,6 +301,8 @@ export default function VoiceAssistant() {
         onAgentChange={(agent) => setActiveAgent(agent)}
         onStatusChange={(status) => setCallStatus(status)}
         onBookingConfirmed={(details) => setBookingDetails(details)}
+        onLabResult={(reports) => setLabResults(reports)}   // NEW Agent 6
+        onBillRead={(details) => setBillDetails(details)}   // NEW Agent 7
       />
       <div className="grid grid-cols-2 gap-6 p-6">
         <div>
@@ -294,6 +314,8 @@ export default function VoiceAssistant() {
             onEndCall={endCall}
           />
           {bookingDetails && <BookingConfirmationCard details={bookingDetails} />}
+          {labResults    && <LabResultCard reports={labResults} />}
+          {billDetails   && <BillCard details={billDetails} />}
         </div>
         <div>
           <AgentActivityFeed activeAgent={activeAgent} callStatus={callStatus} />
@@ -317,9 +339,15 @@ Invisible component. Listens to LiveKit data channel events from the agent worke
 // Agent worker sends these events via LiveKit data channel ("agent-events"):
 type AgentEvent =
   | { type: "transcript";        role: "user" | "assistant"; content: string; timestamp: string }
-  | { type: "agent_change";      agent: string }     // "language_router" | "voice_intake" | "scheduler" | "prescription" | "followup"
-  | { type: "status_change";     status: CallStatus } // "greeting" | "listening" | "processing" | "speaking"
+  | { type: "agent_change";      agent: string }
+    // agent values: "language_router" | "voice_intake" | "scheduler"
+    //             | "prescription" | "lab_status" | "billing" | "followup"
+  | { type: "status_change";     status: CallStatus }
   | { type: "booking_confirmed"; details: BookingDetails }
+  | { type: "lab_result_ready";  reports: { test_name: string; summary: string }[] }
+    // Fired by Agent 6 when ready reports are found — show a lab result card in UI
+  | { type: "bill_read";         amount: number; sms_sent: boolean }
+    // Fired by Agent 7 after reading bill — show a billing card in UI
   | { type: "call_dropped";      reason: string }
   | { type: "error";             message: string }
 
@@ -331,6 +359,8 @@ function AgentEventHandler({ onTranscript, onAgentChange, onStatusChange, onBook
       case "agent_change":     onAgentChange(event.agent); break;
       case "status_change":    onStatusChange(event.status); break;
       case "booking_confirmed": onBookingConfirmed(event.details); break;
+      case "lab_result_ready": onLabResult?.(event.reports); break;    // NEW Agent 6
+      case "bill_read":        onBillRead?.(event); break;             // NEW Agent 7
       case "error":            console.error("Agent error:", event.message); break;
     }
   });
@@ -389,8 +419,16 @@ const AGENTS = [
   { id: "voice_intake",    label: "Voice Intake",         sublabel: "Understands intent" },
   { id: "scheduler",       label: "Appointment Scheduler", sublabel: "Books slots" },
   { id: "prescription",    label: "Prescription Agent",   sublabel: "Reads medication" },
+  { id: "lab_status",      label: "Lab Status",           sublabel: "Report lookup" },
+  { id: "billing",         label: "Billing Agent",        sublabel: "Bill + payment link" },
   { id: "followup",        label: "Follow-up Agent",      sublabel: "Post-discharge" },
 ];
+
+// Note: on any given call only 2-3 agents activate.
+// language_router and voice_intake always activate.
+// scheduler, prescription, lab_status, or billing activates based on intent.
+// followup only activates on outbound cron calls.
+// Show all 7 — inactive ones display as pending (○ gray dot).
 
 // Visual per agent:
 // pending:   ○ gray circle  + gray label (not yet activated)
@@ -424,6 +462,49 @@ const AGENTS = [
 ```
 
 ---
+
+### `LabResultCard.tsx` — Shown on lab_result_ready event (Agent 6) — NEW
+
+```typescript
+// Appears below CallControls when lab_result_ready event received
+// Stays visible for the rest of the call + after call ends
+// Neomorphic style: neo-card with neo-inset result rows
+
+// Content when reports found:
+// 🧪 Lab Reports
+// [test_name]  [summary in patient's language — already translated by Agent 6]
+// [test_name]  [summary]
+// (one row per ready report)
+
+// Content when only pending:
+// 🧪 Lab Reports
+// [test_name] — Processing... (amber dot indicator)
+
+// Language-aware header:
+//   hi-IN: "आपकी Lab Reports"
+//   mr-IN: "तुमचे Lab Reports"
+```
+
+### `BillCard.tsx` — Shown on bill_read event (Agent 7) — NEW
+
+```typescript
+// Appears below CallControls when bill_read event received
+// Stays visible for the rest of the call + after call ends
+// Neomorphic style: neo-card with neo-inset amount cell
+
+// Content:
+// 💳 Outstanding Bill
+// Amount: ₹3,200
+// [SMS sent indicator — green check if sms_sent=true]
+// "Payment link sent to your mobile number"
+
+// Language-aware labels:
+//   hi-IN: "बकाया Bill"  /  "Payment link भेज दिया गया"
+//   mr-IN: "बाकी Bill"   /  "Payment link पाठवला गेला"
+
+// If sms_sent=false (no payment_link in DB):
+//   Show amount only, no SMS indicator
+```
 
 ### `CallSummaryCard.tsx` — Shown after call ends
 
@@ -478,6 +559,20 @@ STORED_RESPONSE_KEYS = {
   // Escalation — spoken before handing off to human
   "escalation_hi": "मैं आपको अभी हमारे receptionist से connect करता हूँ। एक moment रुकिए।",
   "escalation_mr": "मी तुम्हाला आमच्या receptionist शी connect करतो. एक क्षण थांबा।",
+
+  // Lab report — spoken by Agent 6 when report is ready
+  "lab_ready_hi": "{test_name} की रिपोर्ट आ गई है। {result_summary}",
+  "lab_ready_mr": "{test_name} चा रिपोर्ट आला आहे। {result_summary}",
+  "lab_pending_hi": "आपकी {test_name} की जांच अभी प्रक्रिया में है। कृपया बाद में जांचें।",
+  "lab_pending_mr": "तुमची {test_name} तपासणी अजून प्रक्रियेत आहे। कृपया नंतर तपासा।",
+  "lab_none_hi": "आपके लिए कोई lab report उपलब्ध नहीं है।",
+  "lab_none_mr": "तुमच्यासाठी कोणताही lab report उपलब्ध नाही।",
+
+  // Billing — spoken by Agent 7
+  "bill_amount_hi": "आपका बकाया bill ₹{amount} है। मैंने आपके registered mobile पर payment link भेज दिया है।",
+  "bill_amount_mr": "तुमचे बाकी bill ₹{amount} आहे। मी तुमच्या registered mobile वर payment link पाठवला आहे।",
+  "bill_none_hi": "आपके account पर कोई बकाया bill नहीं है।",
+  "bill_none_mr": "तुमच्या account वर कोणतेही बाकी bill नाही।",
 
   // Call end acknowledgement
   "goodbye_hi": "धन्यवाद! आपका दिन शुभ हो।",
@@ -566,6 +661,8 @@ frontend/
 │   ├── TranscriptPanel.tsx          # Live conversation transcript
 │   ├── AgentActivityFeed.tsx        # 5-agent pipeline visualizer
 │   ├── BookingConfirmationCard.tsx  # Shown on booking_confirmed event
+│   ├── LabResultCard.tsx            # Shown on lab_result_ready event (Agent 6)
+│   ├── BillCard.tsx                 # Shown on bill_read event (Agent 7)
 │   ├── CallSummaryCard.tsx          # Shown after call ends or drops
 │   └── AdminDashboard.tsx           # /admin page charts + tables
 │
@@ -592,17 +689,23 @@ BACKEND_URL=https://your-railway-app.up.railway.app
 
 ## Styling Notes
 
-- Tailwind CSS with a medical/professional palette
-- Primary blue-600, accent purple-600
-- Background white, cards gray-50 with subtle border
-- "Start Call" button: green-600, large, phone icon, prominent
-- "End Call" button: red-600, always visible once call starts, phone-off icon
-- Listening state: green pulsing ring + animated sound wave bars
-- Speaking state: purple pulsing ring + speaker wave animation
-- Agent Activity Feed: most prominent element on the right column
-- Transcript: clean, readable, auto-scroll, Unicode Hindi/Marathi renders correctly
-  with `font-family: 'Noto Sans Devanagari', sans-serif` — add this to `layout.tsx`
-- Mobile: call controls full-width top, transcript below, activity feed collapsed
+**Emerald Ivory palette** — the only palette used in this project:
+- Background: `#ece8e2` (warm off-white ivory)
+- Shadow dark: `#c2b9aa` / Shadow light: `#fffefb`
+- Text: `#4a4640` / Text muted: `#948e82`
+- Accent (emerald): `#2f7d6b` — active states, agent bubbles, language highlight
+- Green (sage): `#6bb08a` — Start Call button, success
+- Red (terracotta): `#c96a55` — End Call button, error
+- Amber: `#c99a5b` — processing state
+
+Key UI elements:
+- Header: 44px circle with 14px emerald dot + "Swastha AI" (20px 800-weight) + subtitle
+- "Start Call" button: 88×88px sage-green circle, ▶ triangle (not phone icon)
+- "End Call" button: 60×60px terracotta circle, ■ square stop icon
+- Session bar: three sections separated by 1px inset dividers (neo-session-divider)
+- Transcript: 456px fixed height, inset shadow box, Devanagari font for Hindi/Marathi
+- Language pills: "Hindi" / "Marathi" / "Auto" (three equal-width buttons, active = neo-in-md)
+- Font: 'Plus Jakarta Sans' primary, 'Noto Sans Devanagari' for transcript/booking text
 
 ### Devanagari font (critical)
 
