@@ -58,16 +58,23 @@ from agents.tools.translate_tools import translate_text, sarvam_identify_languag
 logger = logging.getLogger("livekit-agent")
 
 
-def _flush_langsmith() -> None:
-    """Flush LangSmith's background tracing threads before the worker process exits.
-    Without this, the non-daemon threads block exit and log noisy warnings."""
+def _shutdown_langsmith() -> None:
+    """Drain and stop LangSmith's background tracing threads.
+
+    flush() alone only drains the queue — the non-daemon threads keep running
+    and LiveKit warns they may block process exit. cleanup() flushes AND sets
+    _manual_cleanup, which makes the threads terminate. The tracer's client is
+    the module-level singleton in langsmith.run_trees, not a fresh Client()."""
     try:
-        langsmith.Client().flush()
+        from langsmith.run_trees import _CLIENT
+
+        if _CLIENT is not None:
+            _CLIENT.cleanup(timeout=5.0)
     except Exception:
-        pass
+        logger.debug("langsmith cleanup failed (non-fatal)", exc_info=True)
 
 
-atexit.register(_flush_langsmith)
+atexit.register(_shutdown_langsmith)
 
 # Entries are either a substring (str) or a tuple of tokens that must ALL be
 # present (any order, any distance). Tuples handle intervening words —
@@ -484,7 +491,10 @@ class HospitalReceptionistAgent(Agent):
                         model="sarvam-30b",
                     )
                 )
-            summarised = resp.choices[0].message.content.strip()
+            content = resp.choices[0].message.content if resp.choices else None
+            summarised = content.strip() if content else None
+            if not summarised:
+                return reply
             logger.debug("GUARDRAIL[tts_cap]: original=%d chars, summarised=%d chars", len(reply), len(summarised))
             return summarised
         except Exception:
@@ -611,6 +621,10 @@ async def entrypoint(ctx: JobContext) -> None:
             agent.state["tts_voice"] = lang_cfg["tts_voice"]
             agent.state["tts_model"] = lang_cfg["tts_model"]
             logger.info("entrypoint: forced lang_code=%s tts_voice=%s", pref, lang_cfg["tts_voice"])
+    except (asyncio.TimeoutError, TimeoutError):
+        # Patient never joined within 10s — they closed the tab or abandoned the
+        # connection. Not an error; auto-detect handles language if they join late.
+        logger.info("entrypoint: no participant joined within 10s — using language auto-detect")
     except Exception:
         logger.exception("entrypoint: failed to read participant metadata, falling back to auto-detect")
 

@@ -364,10 +364,25 @@ async def voice_intake_node(state: AgentState) -> AgentState:
             "escalation_reason": "LLM unrecoverable after retries",
         }
 
+    _ACTIONABLE_INTENTS = {"book", "prescription", "lab", "billing", "followup"}
     for field in _INTAKE_FIELDS:
         new_val = extracted.get(field)
-        if new_val is not None:
-            collected[field] = new_val
+        if new_val is None:
+            continue
+        if field == "intent" and new_val == "query":
+            # Never let "query" overwrite an already-locked actionable intent.
+            if collected.get("intent") in _ACTIONABLE_INTENTS:
+                continue
+            # Also skip "query" when the utterance only contained phone/name digits
+            # (patient was just providing identity info, not expressing a new intent).
+            last_user_msg = next(
+                (m["content"] for m in reversed(state["messages"]) if m["role"] == "user"),
+                "",
+            )
+            phone_only_pattern = re.fullmatch(r"[\d\s\-+()]+", last_user_msg.strip())
+            if phone_only_pattern:
+                continue
+        collected[field] = new_val
 
     intent = collected.get("intent")
     reply_text = extracted.get("reply")

@@ -1,1 +1,1 @@
-# iac package — infrastructure scripts for local dev and deployment
+"""IAC package for the hospital receptionist stack."""

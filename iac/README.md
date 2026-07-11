@@ -1,130 +1,84 @@
-# iac/ — Infrastructure as Code
+# IAC — Infrastructure as Code
 
-One folder, one command. Everything needed to run and deploy the Hospital Receptionist stack.
+Everything needed to provision, seed, run and deploy the hospital receptionist
+stack lives in this folder. One `.env` at the repo root drives all of it
+(copy `.env.example` and fill in values).
 
----
+## Deployment topology
 
-## Local development
-
-```bash
-# First time
-cp .env.example .env       # fill in your API keys
-chmod +x iac/run.sh
-./iac/run.sh               # installs deps, migrates DB, seeds, starts all 3 services
-```
-
-```bash
-# Re-seed (wipe DB + fresh demo data, then start)
-./iac/run.sh --reset
-
-# Seed only (no restart)
-./iac/run.sh --seed
-
-# Stop all background services
-./iac/run.sh --stop
-```
-
-Services started:
-
-| Service | URL | Log |
+| Piece | Where | How |
 |---|---|---|
-| Next.js frontend | http://localhost:3000 | iac/.logs/frontend.log |
-| FastAPI backend | http://localhost:8000 | iac/.logs/backend.log |
-| LiveKit agent worker | (connects to LiveKit Cloud) | iac/.logs/livekit.log |
-
----
-
-## Database
-
-### Auto-managed (default)
-`run.sh` calls SQLAlchemy `create_all()` on every start — idempotent, safe to run repeatedly.
-
-### Manual reset (Supabase UI)
-Copy-paste `iac/supabase_schema.sql` into the Supabase SQL Editor and run it to recreate all 8 tables from scratch. Useful when you need a clean slate on the hosted DB.
-
-### db_reset.py
-```bash
-python -m iac.db_reset     # drop all tables + re-create + seed
-```
-
----
-
-## Deploy (all free tiers)
-
-```bash
-./iac/deploy.sh              # backend → Render, frontend → Vercel
-./iac/deploy.sh --backend    # backend only
-./iac/deploy.sh --frontend   # frontend only
-```
-
-Supabase, Upstash, LiveKit Cloud, and Sarvam are managed services — nothing to
-deploy there, only env vars.
-
-### Backend → Render (free tier)
-
-`iac/start_production.sh` is the production start command — it runs migrations,
-starts the **LiveKit agent worker in the background**, and uvicorn in the
-foreground (the local `Procfile`/`railway.toml` only start uvicorn).
-
-First-time setup:
-
-1. `./iac/deploy_backend.sh` — copies `iac/render.yaml` to the repo root
-   (Render only reads Blueprints from root) and pushes to GitHub
-2. [dashboard.render.com](https://dashboard.render.com) → New → **Blueprint** → select this repo
-3. Fill in the secret env vars (values from your local `.env`)
-4. Optional but recommended: Settings → **Deploy Hook** → copy the URL into
-   `RENDER_DEPLOY_HOOK_URL` in `.env`; also set `BACKEND_URL` to your
-   `https://….onrender.com` URL so the script health-checks after deploy
-
-After that, every deploy is just `./iac/deploy_backend.sh`.
-
-> Free-tier caveat: the instance sleeps after 15 min idle (~50s cold start).
-> Hit `$BACKEND_URL/health` before a demo, or ping it every 10 min with a free
-> cron service (e.g. cron-job.org) to keep it warm.
-
-### Frontend → Vercel (free tier)
-
-```bash
-npm i -g vercel
-cd frontend && vercel login && vercel link   # first time only
-./iac/deploy_frontend.sh                     # prod deploy
-./iac/deploy_frontend.sh --preview           # preview URL, prod untouched
-```
-
-The script pushes `NEXT_PUBLIC_BACKEND_URL` (from `BACKEND_URL`) and
-`NEXT_PUBLIC_LIVEKIT_URL` (from `LIVEKIT_URL`) out of your local `.env` into
-Vercel, so no dashboard configuration is needed.
-
-### Railway (legacy, paid)
-
-`iac/railway.toml` + `Procfile` remain if you prefer Railway's $5/mo credit —
-but note they start only the API, not the agent worker.
-
----
+| Frontend (Next.js) | **Vercel**, linked to GitHub | Push to `main` → Vercel auto-builds. `deploy_frontend_vercel.sh` syncs env vars + pushes. |
+| Backend (FastAPI + LiveKit agent worker) | **Local machine, exposed via ngrok** | `deploy_backend_ngrok.sh` starts both processes and opens an HTTPS tunnel. |
+| Database | **Supabase PostgreSQL** | Schema in `supabase_schema.sql`; auto-created + seeded by `db_setup.py`. |
+| Short-term memory | **Upstash Redis** | No provisioning script needed — keys are created lazily with TTLs. |
+| Voice infra | **LiveKit Cloud** | Managed; only needs `LIVEKIT_*` env vars. |
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `run.sh` | Local dev launcher — Python + Node deps, DB, all 3 services |
-| `deploy.sh` | Deploy everything: backend → Render, frontend → Vercel |
-| `deploy_backend.sh` | Backend deploy: sync Blueprint to root, push, trigger hook, health-check |
-| `deploy_frontend.sh` | Frontend deploy: sync env vars to Vercel, deploy, smoke-check |
-| `start_production.sh` | Production start command — agent worker + uvicorn in one container |
-| `render.yaml` | Render Blueprint (source of truth — auto-copied to repo root) |
-| `db_reset.py` | Drop + re-create + seed the database |
-| `supabase_schema.sql` | Raw SQL schema for manual Supabase setup / inspection |
-| `railway.toml` | Railway deployment config (legacy — API only, no agent worker) |
-| `vercel.json` | Vercel deployment config (root dir, env vars) |
+| `run_local.sh` | Run **everything locally** with uv: DB setup + seed, FastAPI backend, LiveKit agent worker, Next.js frontend. |
+| `deploy_backend_ngrok.sh` | Start backend + agent worker and expose them publicly through an ngrok tunnel. `--sync-vercel` pushes the tunnel URL to Vercel and redeploys the frontend. |
+| `deploy_frontend_vercel.sh` | Sync `NEXT_PUBLIC_*` env vars to Vercel and deploy via GitHub push (or `--direct` for a CLI deploy). |
+| `db_setup.py` | Idempotent: create all 8 tables, seed demo data only if the DB is empty. |
+| `db_reset.py` | Destructive: drop all tables, re-create, re-seed fresh demo data. |
+| `supabase_schema.sql` | Reference schema — paste into the Supabase SQL editor for manual bootstrap/inspection. |
+| `vercel.json` | Vercel project config (Next.js framework, deploy from `main`). |
 
----
+## Quick start
 
-## Prerequisites
+### 1. Run everything locally
 
-| Tool | Version | Install |
-|---|---|---|
-| `uv` | ≥ 0.4 | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-| `node` | ≥ 20 | https://nodejs.org |
-| `npm` | ≥ 10 | bundled with Node |
+```bash
+cp .env.example .env       # fill in Sarvam, LiveKit, Supabase, Upstash keys
+./iac/run_local.sh         # installs deps (uv + npm), sets up DB, starts all 3 services
+```
 
-Python version is pinned to 3.11 via `uv venv --python 3.11`.
+- Frontend: http://localhost:3000 · Admin: http://localhost:3000/admin
+- Backend: http://localhost:8000 · Docs: http://localhost:8000/docs
+- Logs in `iac/.logs/`, stop with `./iac/run_local.sh --stop` or Ctrl+C
+
+Flags: `--reset` (drop + re-seed DB first), `--seed` (DB only), `--stop`.
+
+### 2. Deploy backend (ngrok)
+
+```bash
+brew install ngrok
+ngrok config add-authtoken <your-token>
+./iac/deploy_backend_ngrok.sh --sync-vercel
+```
+
+Prints a public `https://….ngrok-free.app` URL and, with `--sync-vercel`,
+points the Vercel frontend at it and triggers a redeploy. Set `NGROK_DOMAIN`
+in `.env` if you have a reserved static domain (URL then survives restarts).
+
+### 3. Deploy frontend (Vercel ⇄ GitHub)
+
+```bash
+npm i -g vercel
+./iac/deploy_frontend_vercel.sh
+```
+
+First run walks through `vercel link` interactively and connects the GitHub
+repo. After that, deploys are just commits pushed to `main` — the script
+syncs `NEXT_PUBLIC_BACKEND_URL` / `NEXT_PUBLIC_LIVEKIT_URL` from your `.env`
+and pushes the current branch. Use `--direct` to deploy from local files
+without going through GitHub, `--env-only` to only sync env vars.
+
+### 4. Database only
+
+```bash
+uv run python -m iac.db_setup            # create tables + seed if empty
+uv run python -m iac.db_setup --force-seed
+uv run python -m iac.db_reset            # DESTRUCTIVE: drop + re-create + re-seed
+```
+
+## Gotchas
+
+- **ngrok free tier** rotates the URL on every restart — rerun with
+  `--sync-vercel` after a restart, or reserve a static domain and set `NGROK_DOMAIN`.
+- **Vercel env vars are build-time** (`NEXT_PUBLIC_*`): changing them requires
+  a redeploy, which both scripts handle for you.
+- The LiveKit agent worker connects **outbound** to LiveKit Cloud, so it needs
+  no tunnel — only the FastAPI HTTP API goes through ngrok.
