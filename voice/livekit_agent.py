@@ -58,25 +58,23 @@ from agents.tools.translate_tools import translate_text, sarvam_identify_languag
 logger = logging.getLogger("livekit-agent")
 
 
-def _flush_langsmith() -> None:
-    """Flush LangSmith's background tracing threads before the worker process exits.
-    Without this, the non-daemon threads block exit and log noisy warnings."""
+def _shutdown_langsmith() -> None:
+    """Drain and stop LangSmith's background tracing threads.
+
+    flush() alone only drains the queue — the non-daemon threads keep running
+    and LiveKit warns they may block process exit. cleanup() flushes AND sets
+    _manual_cleanup, which makes the threads terminate. The tracer's client is
+    the module-level singleton in langsmith.run_trees, not a fresh Client()."""
     try:
-        # Use the module-level singleton — creating a new Client() here doesn't
-        # signal the existing background threads to stop.
-        client = langsmith.get_client()
-        client.flush()
-    except AttributeError:
-        # Older langsmith versions don't have get_client(); fall back.
-        try:
-            langsmith.Client().flush()
-        except Exception:
-            pass
+        from langsmith.run_trees import _CLIENT
+
+        if _CLIENT is not None:
+            _CLIENT.cleanup(timeout=5.0)
     except Exception:
-        pass
+        logger.debug("langsmith cleanup failed (non-fatal)", exc_info=True)
 
 
-atexit.register(_flush_langsmith)
+atexit.register(_shutdown_langsmith)
 
 # Entries are either a substring (str) or a tuple of tokens that must ALL be
 # present (any order, any distance). Tuples handle intervening words —
