@@ -44,21 +44,43 @@ def _compute_readmission_risk(fever: bool, pain_level: int, medication_adherence
 
 
 @traceable(run_type="llm", name="sarvam-30b:followup_checklist")
-async def _run_checklist_turn(state: AgentState, discharge: dict) -> dict:
+async def _run_checklist_turn(state: AgentState, discharge: dict, collected: dict | None = None) -> dict:
     """Calls sarvam-30b to ask the next unanswered checklist question, or
-    report that all four items have been collected."""
+    report that all four items have been collected.
+
+    `collected` is the code-side memory of fields already answered in previous
+    turns. Injecting it explicitly prevents the model from re-asking a question
+    it failed to notice was answered (deterministic loop at temperature=0)."""
     system_prompt = build_followup_prompt(
         lang_code=state["lang_code"],
         diagnosis=discharge["diagnosis"],
         medications=discharge["medications"],
     )
-    response = client.chat.completions(
-        messages=[{"role": "system", "content": system_prompt}, *state["messages"]],
-        model="sarvam-30b",
-        temperature=0.0,
-        max_tokens=2048,
-    )
-    reply = response.choices[0].message.content
+    if collected:
+        known = ", ".join(f"{k}={v!r}" for k, v in collected.items())
+        system_prompt += (
+            f"\n\n━━━ ALREADY COLLECTED — DO NOT RE-ASK ━━━\n"
+            f"These fields were already answered in earlier turns: {known}\n"
+            f"Include these values in your JSON output. Only ask about fields NOT listed here. "
+            f"If all four fields are now known, set all_answered=true and close the call."
+        )
+    import asyncio
+
+    def _sync_call() -> str:
+        response = client.chat.completions(
+            messages=[{"role": "system", "content": system_prompt}, *state["messages"]],
+            model="sarvam-30b",
+            temperature=0.0,
+            max_tokens=2048,
+        )
+        return response.choices[0].message.content or ""
+
+    try:
+        reply = await asyncio.wait_for(asyncio.to_thread(_sync_call), timeout=25.0)
+    except asyncio.TimeoutError:
+        logger.error("followup: checklist LLM call timed out")
+        return {"reply": "", "all_answered": False}
+
     parsed = extract_json(reply)
     if parsed is None:
         logger.warning("followup: LLM reply wasn't parseable JSON, treating as mid-checklist: %r", reply)

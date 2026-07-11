@@ -207,4 +207,4 @@ async def prescription_outbound_node(state: AgentState) -> AgentState:
     await mark_reminder_sent(state["patient_id"])
     logger.info("prescription_outbound: reminder sent and marked for patient_id=%s", state.get("patient_id"))
 
-    return {**state, "messages": messages, "call_outcome": {"reminder_sent": True}}
+    return {**state, "messages": messages, "call_outcome": {"reminder_sent": True, "status": "completed"}}

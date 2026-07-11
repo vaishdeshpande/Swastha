@@ -119,13 +119,30 @@ async def seed():
         ]
         session.add_all(prescriptions)
 
-        # 2 discharge records for cron/Agent 5 testing.
+        # 3 discharge records for cron/Agent 5 testing.
+        # patients[0] = Ramesh Kumar — used by the outbound demo simulation.
         discharge_followups = [
+            DischargeFollowup(
+                patient_id=patients[0].id,
+                discharge_date=datetime.utcnow() - timedelta(days=3),
+                diagnosis="Hypertensive crisis - stabilised",
+                medications_prescribed=[
+                    {"name": "Amlodipine", "dosage": "5mg", "frequency": "once daily morning"},
+                    {"name": "Metformin", "dosage": "500mg", "frequency": "twice daily with meals"},
+                ],
+                due_at=datetime.utcnow() + timedelta(hours=1),  # due soon — pickable by cron
+                status="pending",
+                job_type="followup",
+            ),
             DischargeFollowup(
                 patient_id=patients[1].id,
                 discharge_date=datetime.utcnow() - timedelta(days=2),
-                diagnosis="Appendectomy - laparoscopic",
-                medications_prescribed=[{"name": "Cefixime", "dosage": "200mg", "frequency": "twice daily"}],
+                diagnosis="Laparoscopic appendectomy - successful, no complications",
+                medications_prescribed=[
+                    {"name": "Cefixime", "dosage": "200mg", "frequency": "twice daily for 5 days"},
+                    {"name": "Pantoprazole", "dosage": "40mg", "frequency": "once daily before breakfast"},
+                    {"name": "Paracetamol", "dosage": "500mg", "frequency": "every 6 hours if pain"},
+                ],
                 due_at=datetime.utcnow() - timedelta(hours=1),  # already due — pickable by cron
                 status="pending",
                 job_type="followup",
@@ -198,7 +215,7 @@ async def seed():
 
         await session.commit()
 
-    print("Seed complete: 15 doctors, 10 patients, slots per available day, 3 prescriptions, 2 discharge followups, 3 lab reports, 2 bills")
+    print("Seed complete: 15 doctors, 10 patients, slots per available day, 3 prescriptions, 3 discharge followups, 3 lab reports, 2 bills")
 
 
 if __name__ == "__main__":
