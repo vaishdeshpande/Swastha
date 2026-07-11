@@ -136,7 +136,9 @@ def route_after_intake(state: AgentState) -> str:
         "billing": "billing",
         # "followup" is outbound-only (Agent 5). If a patient says "follow up" inbound,
         # keep them in the intake loop to clarify what they actually need.
-        # "query" is too generic — clarify before routing.
+        # "query" = anything the system can't handle (insurance, parking, timings, etc.)
+        # → connect to human staff immediately rather than looping or fabricating an answer.
+        "query": "human_handoff",
     }
 
     if intent in intent_routes:

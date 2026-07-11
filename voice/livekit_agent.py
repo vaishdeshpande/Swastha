@@ -62,7 +62,16 @@ def _flush_langsmith() -> None:
     """Flush LangSmith's background tracing threads before the worker process exits.
     Without this, the non-daemon threads block exit and log noisy warnings."""
     try:
-        langsmith.Client().flush()
+        # Use the module-level singleton — creating a new Client() here doesn't
+        # signal the existing background threads to stop.
+        client = langsmith.get_client()
+        client.flush()
+    except AttributeError:
+        # Older langsmith versions don't have get_client(); fall back.
+        try:
+            langsmith.Client().flush()
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -484,7 +493,10 @@ class HospitalReceptionistAgent(Agent):
                         model="sarvam-30b",
                     )
                 )
-            summarised = resp.choices[0].message.content.strip()
+            content = resp.choices[0].message.content if resp.choices else None
+            summarised = content.strip() if content else None
+            if not summarised:
+                return reply
             logger.debug("GUARDRAIL[tts_cap]: original=%d chars, summarised=%d chars", len(reply), len(summarised))
             return summarised
         except Exception:
