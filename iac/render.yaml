@@ -1,0 +1,61 @@
+# iac/render.yaml — Render Blueprint for the backend (FastAPI + LiveKit agent worker).
+#
+# Render only reads Blueprints from the REPO ROOT. iac/deploy_backend.sh copies
+# this file to ./render.yaml automatically — edit it HERE, not the root copy.
+#
+# First-time setup:
+#   1. ./iac/deploy_backend.sh   (copies this file to root + pushes to GitHub)
+#   2. https://dashboard.render.com → New → Blueprint → select this repo
+#   3. Fill in the env vars marked sync:false (values from your local .env)
+#   4. (optional) Settings → Deploy Hook → copy URL into RENDER_DEPLOY_HOOK_URL
+#      in your local .env so future deploys are one command.
+
+services:
+  - type: web
+    name: hospital-receptionist
+    runtime: python
+    plan: free                     # free tier: sleeps after 15 min idle, ~50s cold start
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash iac/start_production.sh
+    healthCheckPath: /health
+    autoDeploy: true               # every push to the default branch redeploys
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: PORT
+        value: "8000"
+      - key: LOG_LEVEL
+        value: INFO
+      - key: LANGCHAIN_TRACING_V2
+        value: "false"
+      # Secrets — set values in the Render dashboard, never commit them.
+      - key: SARVAM_API_KEY
+        sync: false
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_PHONE_NUMBER
+        sync: false
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+      - key: FRONTEND_URL
+        sync: false

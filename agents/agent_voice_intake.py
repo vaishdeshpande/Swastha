@@ -218,8 +218,30 @@ async def _extract_patient_info(
 
         parsed = extract_json(accumulated)
         if parsed is None:
-            logger.warning("voice_intake: streaming reply not parseable JSON, treating as clarification: %r", accumulated[:200])
-            return {"reply": accumulated, "intent": None}, phone_task
+            # sarvam-30b drops the JSON wrapper ~30-50% of the time on this
+            # prompt (measured via evals, temperature-independent). One retry
+            # with an explicit instruction recovers most of these — without it
+            # the extracted intent is lost and the patient burns a whole
+            # clarification round.
+            logger.warning("voice_intake: reply not parseable JSON, retrying once: %r", accumulated[:200])
+            retry_messages = [
+                *full_messages,
+                {"role": "assistant", "content": accumulated},
+                {
+                    "role": "user",
+                    "content": (
+                        "Your previous response was not a JSON object. Reply with ONLY "
+                        "the single JSON object described in the system prompt — same "
+                        "content, no prose outside the JSON."
+                    ),
+                },
+            ]
+            retry_reply = await asyncio.to_thread(_sync_batch_extract, retry_messages)
+            parsed = extract_json(retry_reply)
+            if parsed is None:
+                logger.warning("voice_intake: retry still not JSON, treating first reply as clarification")
+                return {"reply": accumulated, "intent": None}, phone_task
+            logger.info("voice_intake: JSON retry succeeded")
         return parsed, phone_task
 
     except (AttributeError, TypeError, NotImplementedError):

@@ -18,7 +18,13 @@ ON_CALL_DOCTOR_PHONE = os.environ["ON_CALL_DOCTOR_PHONE"]
 
 
 async def send_slack_alert(message: str) -> None:
-    """Send escalation alert to Slack channel via webhook."""
+    """Send escalation alert to Slack channel via webhook.
+    No-ops with a warning when SLACK_WEBHOOK_URL is unset — an unconfigured
+    webhook must never crash the escalation path (the patient-facing handoff
+    message has already been queued by the caller)."""
+    if not SLACK_WEBHOOK_URL.strip():
+        logger.warning("notifications: SLACK_WEBHOOK_URL not configured — skipping Slack alert")
+        return
     logger.info("notifications: sending Slack alert (%d chars)", len(message))
     async with httpx.AsyncClient() as client:
         response = await client.post(SLACK_WEBHOOK_URL, json={"text": message})
@@ -29,7 +35,10 @@ async def send_slack_alert(message: str) -> None:
 
 
 async def send_sms(phone: str, message: str) -> None:
-    """Send SMS via Twilio."""
+    """Send SMS via Twilio. No-ops with a warning when Twilio isn't configured."""
+    if not (TWILIO_ACCOUNT_SID.strip() and TWILIO_AUTH_TOKEN.strip() and TWILIO_PHONE_NUMBER.strip()):
+        logger.warning("notifications: Twilio not configured — skipping SMS to %s", phone)
+        return
     logger.info("notifications: sending SMS to %s (%d chars)", phone, len(message))
     twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     msg = twilio_client.messages.create(

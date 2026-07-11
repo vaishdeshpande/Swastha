@@ -13,8 +13,7 @@ interface LanguageSelectorProps {
 
 export default function LanguageSelector({ value, onChange, disabled }: LanguageSelectorProps) {
   return (
-    <div>
-      <p className="neo-label">Language</p>
+    <div style={{ width: "100%" }}>
       <div className="flex gap-2">
         {LANGUAGE_OPTIONS.map((opt) => (
           <button

@@ -21,3 +21,4 @@ tests/e2e/__pycache__/*
 tests/agents/__pycache__/*
 tests/tools/__pycache__/*
 voice/__pycache__/*
+evals/__pycache__/run_eval.cpython-311.pyc

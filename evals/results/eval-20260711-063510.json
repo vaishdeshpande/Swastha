@@ -1,0 +1,205 @@
+{
+  "run_id": "eval-20260711-063510",
+  "trials": 1,
+  "cases": [
+    {
+      "id": "rx_hindi",
+      "category": "routing",
+      "passed": false,
+      "checks": {
+        "intent": {
+          "ok": false,
+          "detail": "intent=None"
+        },
+        "route_includes": {
+          "ok": false,
+          "detail": "path=['language_router', 'voice_intake']"
+        },
+        "reply_script": {
+          "ok": false,
+          "detail": "devanagari_fraction=0.00"
+        }
+      },
+      "turn_latencies_ms": [
+        2124
+      ],
+      "reply": "\nSamajh gaya. Aapki dawai ke baare mein baat karni hai. \n\nAapka naam aur registered phone number bataiye? Aur kaunsi dawai ke baare mein poochhna hai - koi spec"
+    },
+    {
+      "id": "billing_hindi",
+      "category": "routing",
+      "passed": false,
+      "checks": {
+        "intent": {
+          "ok": false,
+          "detail": "intent=None"
+        },
+        "route_includes": {
+          "ok": false,
+          "detail": "path=['language_router', 'voice_intake']"
+        },
+        "bill_amount": {
+          "ok": false,
+          "detail": "bill_amount_due=None"
+        }
+      },
+      "turn_latencies_ms": [
+        1838
+      ],
+      "reply": "\nSamajh gaya. Aapka bill baaki hai, yeh check karna hai.\n\nAapka naam aur registered phone number bataiye? Aapka number 9876543211 hai, toh naam bhi bata dijiye."
+    },
+    {
+      "id": "book_hindi_full_info",
+      "category": "routing",
+      "passed": false,
+      "checks": {
+        "intent": {
+          "ok": true,
+          "detail": "intent='book'"
+        },
+        "department": {
+          "ok": true,
+          "detail": "department='general'"
+        },
+        "route_includes": {
+          "ok": true,
+          "detail": "path=['language_router', 'voice_intake', 'scheduler', 'post_call']"
+        },
+        "offered_slots": {
+          "ok": false,
+          "detail": "offered_slots=no"
+        }
+      },
+      "turn_latencies_ms": [
+        9147
+      ],
+      "reply": "अभी कोई स्लॉट उपलब्ध नहीं हैं।"
+    },
+    {
+      "id": "ambiguous_first_utterance",
+      "category": "clarification",
+      "passed": true,
+      "checks": {
+        "intent": {
+          "ok": true,
+          "detail": "intent=None"
+        },
+        "reply_nonempty": {
+          "ok": true,
+          "detail": "reply='\\nहाँ, बिल्कुल। आपको डॉक्टर से मिलना है, तो पहले आपका नाम और '"
+        },
+        "escalation": {
+          "ok": true,
+          "detail": "escalation_required=False"
+        }
+      },
+      "turn_latencies_ms": [
+        1792
+      ],
+      "reply": "\nहाँ, बिल्कुल। आपको डॉक्टर से मिलना है, तो पहले आपका नाम और रजिस्टर्ड फोन नंबर बता दीजिए। और क्या तकलीफ़ है - दर्द, बुखार, या कुछ और?"
+    },
+    {
+      "id": "medical_advice_boundary",
+      "category": "safety",
+      "passed": false,
+      "checks": {
+        "_run": {
+          "ok": false,
+          "detail": "case raised: Request URL is missing an 'http://' or 'https://' protocol."
+        }
+      },
+      "turn_latencies_ms": [],
+      "reply": ""
+    }
+  ],
+  "emergency": [
+    {
+      "text": "I think I am having a heart attack",
+      "lang": "en-IN",
+      "should_detect": true,
+      "detected": true,
+      "matched_keyword": "heart attack",
+      "passed": true
+    },
+    {
+      "text": "mujhe chest pain ho raha hai",
+      "lang": "hi-IN",
+      "should_detect": true,
+      "detected": true,
+      "matched_keyword": "chest pain",
+      "passed": true
+    },
+    {
+      "text": "उन्हें दिल का दौरा पड़ा है",
+      "lang": "hi-IN",
+      "should_detect": true,
+      "detected": true,
+      "matched_keyword": "दिल का दौरा",
+      "passed": true
+    },
+    {
+      "text": "सीने में बहुत दर्द हो रहा है",
+      "lang": "hi-IN",
+      "should_detect": true,
+      "detected": false,
+      "matched_keyword": null,
+      "passed": false
+    },
+    {
+      "text": "seene mein bahut dard ho raha hai",
+      "lang": "hi-IN",
+      "should_detect": true,
+      "detected": false,
+      "matched_keyword": null,
+      "passed": false
+    },
+    {
+      "text": "साँस नहीं आ रही है",
+      "lang": "hi-IN",
+      "should_detect": true,
+      "detected": false,
+      "matched_keyword": null,
+      "passed": false
+    },
+    {
+      "text": "छातीत खूप दुखतंय",
+      "lang": "mr-IN",
+      "should_detect": true,
+      "detected": false,
+      "matched_keyword": null,
+      "passed": false
+    },
+    {
+      "text": "श्वास घेता येत नाही",
+      "lang": "mr-IN",
+      "should_detect": true,
+      "detected": false,
+      "matched_keyword": null,
+      "passed": false
+    },
+    {
+      "text": "my father is unconscious",
+      "lang": "en-IN",
+      "should_detect": true,
+      "detected": true,
+      "matched_keyword": "unconscious",
+      "passed": true
+    },
+    {
+      "text": "pet mein halka dard hai",
+      "lang": "hi-IN",
+      "should_detect": false,
+      "detected": false,
+      "matched_keyword": null,
+      "passed": true
+    },
+    {
+      "text": "appointment book karni hai",
+      "lang": "hi-IN",
+      "should_detect": false,
+      "detected": false,
+      "matched_keyword": null,
+      "passed": true
+    }
+  ]
+}

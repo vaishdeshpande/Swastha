@@ -49,33 +49,56 @@ python -m iac.db_reset     # drop all tables + re-create + seed
 
 ---
 
-## Deploy
-
-### Backend → Railway
-
-1. Push repo to GitHub
-2. Create a new Railway project → "Deploy from GitHub"
-3. Railway auto-detects Python via `requirements.txt`
-4. Set env vars in Railway dashboard (copy from `.env`)
-5. Railway uses `Procfile` (`uvicorn api.main:app`) to start the service
-6. `iac/railway.toml` sets health check path to `/health`
-
-### Frontend → Vercel
+## Deploy (all free tiers)
 
 ```bash
-# Install Vercel CLI
-npm i -g vercel
-
-# From repo root
-cd frontend
-vercel --prod
-
-# Set env vars in Vercel dashboard:
-#   NEXT_PUBLIC_BACKEND_URL = https://your-railway-app.up.railway.app
-#   NEXT_PUBLIC_LIVEKIT_URL = wss://your-project.livekit.cloud
+./iac/deploy.sh              # backend → Render, frontend → Vercel
+./iac/deploy.sh --backend    # backend only
+./iac/deploy.sh --frontend   # frontend only
 ```
 
-`iac/vercel.json` points Vercel at the `frontend/` directory.
+Supabase, Upstash, LiveKit Cloud, and Sarvam are managed services — nothing to
+deploy there, only env vars.
+
+### Backend → Render (free tier)
+
+`iac/start_production.sh` is the production start command — it runs migrations,
+starts the **LiveKit agent worker in the background**, and uvicorn in the
+foreground (the local `Procfile`/`railway.toml` only start uvicorn).
+
+First-time setup:
+
+1. `./iac/deploy_backend.sh` — copies `iac/render.yaml` to the repo root
+   (Render only reads Blueprints from root) and pushes to GitHub
+2. [dashboard.render.com](https://dashboard.render.com) → New → **Blueprint** → select this repo
+3. Fill in the secret env vars (values from your local `.env`)
+4. Optional but recommended: Settings → **Deploy Hook** → copy the URL into
+   `RENDER_DEPLOY_HOOK_URL` in `.env`; also set `BACKEND_URL` to your
+   `https://….onrender.com` URL so the script health-checks after deploy
+
+After that, every deploy is just `./iac/deploy_backend.sh`.
+
+> Free-tier caveat: the instance sleeps after 15 min idle (~50s cold start).
+> Hit `$BACKEND_URL/health` before a demo, or ping it every 10 min with a free
+> cron service (e.g. cron-job.org) to keep it warm.
+
+### Frontend → Vercel (free tier)
+
+```bash
+npm i -g vercel
+cd frontend && vercel login && vercel link   # first time only
+./iac/deploy_frontend.sh                     # prod deploy
+./iac/deploy_frontend.sh --preview           # preview URL, prod untouched
+```
+
+The script pushes `NEXT_PUBLIC_BACKEND_URL` (from `BACKEND_URL`) and
+`NEXT_PUBLIC_LIVEKIT_URL` (from `LIVEKIT_URL`) out of your local `.env` into
+Vercel, so no dashboard configuration is needed.
+
+### Railway (legacy, paid)
+
+`iac/railway.toml` + `Procfile` remain if you prefer Railway's $5/mo credit —
+but note they start only the API, not the agent worker.
 
 ---
 
@@ -84,9 +107,14 @@ vercel --prod
 | File | Purpose |
 |---|---|
 | `run.sh` | Local dev launcher — Python + Node deps, DB, all 3 services |
+| `deploy.sh` | Deploy everything: backend → Render, frontend → Vercel |
+| `deploy_backend.sh` | Backend deploy: sync Blueprint to root, push, trigger hook, health-check |
+| `deploy_frontend.sh` | Frontend deploy: sync env vars to Vercel, deploy, smoke-check |
+| `start_production.sh` | Production start command — agent worker + uvicorn in one container |
+| `render.yaml` | Render Blueprint (source of truth — auto-copied to repo root) |
 | `db_reset.py` | Drop + re-create + seed the database |
 | `supabase_schema.sql` | Raw SQL schema for manual Supabase setup / inspection |
-| `railway.toml` | Railway deployment config (start command, health check) |
+| `railway.toml` | Railway deployment config (legacy — API only, no agent worker) |
 | `vercel.json` | Vercel deployment config (root dir, env vars) |
 
 ---

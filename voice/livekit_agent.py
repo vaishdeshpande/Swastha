@@ -54,11 +54,39 @@ from agents.tools.translate_tools import translate_text, sarvam_identify_languag
 
 logger = logging.getLogger("livekit-agent")
 
-EMERGENCY_KEYWORDS: dict[str, list[str]] = {
-    "hi-IN": ["दिल का दौरा", "सांस नहीं", "बेहोश", "ब्रेन स्ट्रोक", "chest pain", "unconscious"],
-    "mr-IN": ["हृदयविकाराचा झटका", "श्वास नाही", "बेशुद्ध", "छातीत दुखणे"],
+# Entries are either a substring (str) or a tuple of tokens that must ALL be
+# present (any order, any distance). Tuples handle intervening words —
+# "सीने में बहुत दर्द" contains no fixed phrase but contains both "सीने" and
+# "दर्द". Gaps found by evals/dataset.yaml's emergency_utterances coverage.
+EMERGENCY_KEYWORDS: dict[str, list] = {
+    "hi-IN": [
+        "दिल का दौरा", "सांस नहीं", "साँस नहीं", "बेहोश", "ब्रेन स्ट्रोक",
+        ("सीने", "दर्द"), ("छाती", "दर्द"), ("seene", "dard"), ("chhati", "dard"),
+        "saans nahi", "chest pain", "unconscious",
+    ],
+    "mr-IN": [
+        "हृदयविकाराचा झटका", "श्वास नाही", "श्वास घेता येत", "बेशुद्ध",
+        ("छाती", "दुख"), ("छातीत", "दुख"), ("chhatit", "dukh"),
+    ],
     "en-IN": ["heart attack", "not breathing", "unconscious", "stroke", "chest pain", "emergency"],
 }
+
+
+def detect_emergency(text: str, lang_code: str) -> str | None:
+    """Return the matched emergency keyword (or 'tok1 + tok2' for co-occurrence
+    matches), or None. Checks the caller's language AND English — patients mix
+    English emergency words into Hindi/Marathi speech.
+
+    Module-level so evals/run_eval.py exercises the exact production logic."""
+    lower = text.lower()
+    for lang in {lang_code, "en-IN"}:
+        for kw in EMERGENCY_KEYWORDS.get(lang, []):
+            if isinstance(kw, str):
+                if kw.lower() in lower:
+                    return kw
+            elif all(part.lower() in lower for part in kw):
+                return " + ".join(kw)
+    return None
 
 MEDICAL_ADVICE_PATTERNS: list[str] = [
     "increase your dose", "double the dose", "stop taking", "stop medication",
@@ -287,15 +315,7 @@ class HospitalReceptionistAgent(Agent):
 
     def _check_emergency(self, text: str) -> str | None:
         """Return the first matched emergency keyword, or None."""
-        lower = text.lower()
-        lang_code = self.state.get("lang_code", "hi-IN")
-        # Check patient's detected language AND English (patients mix English emergency words)
-        langs_to_check = {lang_code, "en-IN"}
-        for lang in langs_to_check:
-            for kw in EMERGENCY_KEYWORDS.get(lang, []):
-                if kw.lower() in lower:
-                    return kw
-        return None
+        return detect_emergency(text, self.state.get("lang_code", "hi-IN"))
 
     async def _check_medical_boundary(self, reply: str) -> str:
         """Guardrail 4: block medical advice patterns from prescription agent."""

@@ -1,9 +1,13 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Noto+Sans+Devanagari:wght@400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
   /* ── Emerald Ivory palette (from design) ── */
+  --neo-page-bg:      #ddd6cb;   /* page canvas — warmer, darker than the card */
+  --neo-page-glow:    #efe9df;   /* soft radial glow at top of page */
   --neo-bg:           #ece8e2;
   --neo-shadow-light: #fffefb;
   --neo-shadow-dark:  #c2b9aa;
@@ -32,16 +36,19 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --neo-bg:           #1e2318;
-    --neo-shadow-light: #2a3020;
-    --neo-shadow-dark:  #141a10;
-    --neo-text:         #c8d4c0;
-    --neo-text-muted:   #6b7865;
-    --neo-accent:       #4dc99a;
-    --neo-accent-light: #1a3d2e;
-    --neo-green:        #4aab7a;
-    --neo-red:          #d06060;
-    --neo-amber:        #c99860;
+    /* Dark Ivory — warm charcoal, night version of Emerald Ivory */
+    --neo-page-bg:      #171412;   /* page canvas — deeper than the card */
+    --neo-page-glow:    #2b2622;   /* soft radial glow at top of page */
+    --neo-bg:           #272320;   /* warm dark charcoal, not green-tinted */
+    --neo-shadow-light: #36312d;   /* lighter than bg — raises surfaces */
+    --neo-shadow-dark:  #191512;   /* darker than bg — creates depth */
+    --neo-text:         #d6d0c8;   /* warm off-white */
+    --neo-text-muted:   #7a7268;   /* warm mid-gray */
+    --neo-accent:       #3fa882;   /* emerald, slightly brighter for dark bg */
+    --neo-accent-light: #1e3a30;
+    --neo-green:        #5aa87a;   /* sage green */
+    --neo-red:          #c96a55;   /* terracotta — unchanged */
+    --neo-amber:        #c99a5b;   /* amber — unchanged */
   }
 }
 
@@ -51,10 +58,14 @@
 
 html,
 body {
-  background: var(--neo-bg);
+  background:
+    radial-gradient(1100px 600px at 50% -10%, var(--neo-page-glow), transparent 70%),
+    var(--neo-page-bg);
+  background-attachment: fixed;
   color: var(--neo-text);
   min-height: 100vh;
   font-family: 'Plus Jakarta Sans', 'Noto Sans Devanagari', 'Segoe UI', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
 /* ---- Layout surfaces ---- */
@@ -63,9 +74,13 @@ body {
   background: var(--neo-bg);
   border-radius: var(--neo-radius-xl);
   padding: 32px;
-  box-shadow: var(--neo-out-lg);
+  /* floats on the darker page canvas — ambient drop shadow + faint top highlight */
+  box-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.22),
+    0 4px 14px rgba(0, 0, 0, 0.10),
+    inset 0 1px 0 var(--neo-shadow-light);
   max-width: 960px;
-  margin: 2rem auto;
+  margin: 2.5rem auto;
 }
 
 .neo-card {
