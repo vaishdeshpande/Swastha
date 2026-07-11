@@ -278,6 +278,47 @@ async def scheduler_node(state: AgentState) -> AgentState:
         return {**state, "messages": messages, "offered_slots": slots, "department_confirmed": True}
 
     if action == "confirm_booking":
+        # ── Defense-in-depth: department must be confirmed before any booking ──
+        # Layer 1: _first_turn_fast_path ensures confirm_department fires on turn 1.
+        # Layer 2 (this guard): blocks booking even if layer 1 is bypassed for any reason.
+        if not state.get("department_confirmed"):
+            logger.warning(
+                "scheduler: BLOCKED confirm_booking — department_confirmed=False (call_id=%s). "
+                "Redirecting to confirm_department.",
+                state.get("call_id"),
+            )
+            dept = normalize_department(state.get("department") or "general")
+            if dept == "unknown":
+                dept = "general"
+            dept_label = _DEPARTMENT_LABELS.get(dept, dept)
+            confirm_en = (
+                f"We have a {dept_label} available for you. "
+                f"Shall I check the available appointment slots?"
+            )
+            reply = await translate_text(confirm_en, source_lang="en-IN", target_lang=lang_code)
+            messages.append({"role": "assistant", "content": reply})
+            return {**state, "messages": messages, "department": dept}
+
+        # ── Confidence check: low-confidence slot match → ask explicitly ──
+        confidence = decision.get("confidence", 1.0)
+        slot_id = decision.get("chosen_slot_id")
+        if confidence < 0.60 or not slot_id:
+            offered = state.get("offered_slots") or []
+            if offered:
+                options = " / ".join(
+                    f"{s.get('time', '')} ({s.get('doctor_name', '')})" for s in offered
+                )
+                clarify_en = f"Just to confirm — which slot would you prefer? {options}"
+            else:
+                clarify_en = "Which slot would you like to book?"
+            reply = await translate_text(clarify_en, source_lang="en-IN", target_lang=lang_code)
+            messages.append({"role": "assistant", "content": reply})
+            logger.info(
+                "scheduler: low-confidence slot selection (%.2f) — asking for explicit choice (call_id=%s)",
+                confidence, state.get("call_id"),
+            )
+            return {**state, "messages": messages}
+
         slot_id = decision.get("chosen_slot_id")
         logger.info("scheduler: booking slot_id=%s for patient_id=%s", slot_id, state.get("patient_id"))
         # Capture slot details before offered_slots is cleared — livekit_agent

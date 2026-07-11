@@ -71,7 +71,7 @@ async def _answer_prescription_query(state: AgentState, prescription_context: di
             "content": (
                 "Your previous response was not valid JSON. "
                 "Reply with ONLY a JSON object matching this schema exactly: "
-                '{"reply": "<spoken text in patient language>", "escalate": false}'
+                '{"reply": "<spoken text in patient language>", "category": 1, "escalate": false, "confidence": 1.0}'
             ),
         },
     ]
@@ -134,9 +134,12 @@ async def prescription_node(state: AgentState) -> AgentState:
 
     decision = await _answer_prescription_query(state, prescription_context)
     reply = decision.get("reply") or ""
+    # Default category to 1 (safe lookup) if missing — e.g. salvaged malformed JSON.
+    category = decision.get("category", 1)
+    logger.info("prescription: question category=%d (patient_id=%s)", category, state.get("patient_id"))
 
-    if decision.get("escalate"):
-        # Escalation path — speak a handoff message if the LLM didn't provide one
+    if category == 3 or decision.get("escalate"):
+        # Medical judgment required — never answer, connect to staff.
         if not reply:
             reply = await translate_text(
                 "I need to connect you to a staff member for this query.",
@@ -144,13 +147,25 @@ async def prescription_node(state: AgentState) -> AgentState:
                 target_lang=lang_code,
             )
         messages.append({"role": "assistant", "content": reply})
-        logger.warning("prescription: escalating (patient_id=%s)", state.get("patient_id"))
+        logger.warning(
+            "prescription: escalating category=%d (patient_id=%s)", category, state.get("patient_id")
+        )
         return {
             **state,
             "messages": messages,
             "escalation_required": True,
             "escalation_reason": "Prescription question beyond scope — patient referred to doctor",
         }
+
+    if category == 2:
+        # General wellness — answer with a standard disclaimer appended.
+        disclaimer = await translate_text(
+            "Please confirm with your doctor if you have any specific concerns.",
+            source_lang="en-IN",
+            target_lang=lang_code,
+        )
+        reply = f"{reply} {disclaimer}" if reply else disclaimer
+        logger.info("prescription: category 2 answer with disclaimer (patient_id=%s)", state.get("patient_id"))
 
     if reply:
         messages.append({"role": "assistant", "content": reply})
