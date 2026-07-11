@@ -621,6 +621,10 @@ async def entrypoint(ctx: JobContext) -> None:
             agent.state["tts_voice"] = lang_cfg["tts_voice"]
             agent.state["tts_model"] = lang_cfg["tts_model"]
             logger.info("entrypoint: forced lang_code=%s tts_voice=%s", pref, lang_cfg["tts_voice"])
+    except (asyncio.TimeoutError, TimeoutError):
+        # Patient never joined within 10s — they closed the tab or abandoned the
+        # connection. Not an error; auto-detect handles language if they join late.
+        logger.info("entrypoint: no participant joined within 10s — using language auto-detect")
     except Exception:
         logger.exception("entrypoint: failed to read participant metadata, falling back to auto-detect")
 
