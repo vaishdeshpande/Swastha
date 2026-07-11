@@ -32,6 +32,13 @@ const LANG_LABEL: Record<LangOption, string> = {
   auto: "Auto",
 };
 
+// Greeting text must match config/languages.yaml so the transcript is consistent
+// with what the cached audio says.
+const GREETING_TEXT: Record<string, string> = {
+  "hi-IN": "नमस्कार! अपोलो हॉस्पिटल्स में आपका स्वागत है। मैं स्वस्था हूँ, आपकी एआई स्वास्थ्य सहायक। अपॉइंटमेंट बुक करने, सही डॉक्टर या विभाग की जानकारी देने, अस्पताल की सेवाओं से जुड़े सवालों के जवाब देने और आपको उचित टीम से जोड़ने में मैं आपकी मदद कर सकती हूँ। कृपया बताइए, आज मैं आपकी कैसे सहायता कर सकती हूँ?",
+  "mr-IN": "नमस्कार! अपोलो हॉस्पिटल्समध्ये आपले स्वागत आहे. मी स्वस्था आहे, तुमची एआय आरोग्य सहाय्यक. अपॉइंटमेंट बुक करणे, योग्य डॉक्टर किंवा विभागाची माहिती देणे, रुग्णालयाच्या सेवांबाबत माहिती देणे आणि योग्य विभागाशी जोडणे यासाठी मी तुमची मदत करू शकते. कृपया सांगा, आज मी तुमची कशी मदत करू?",
+};
+
 function formatElapsed(sec: number): string {
   const mm = String(Math.floor(sec / 60)).padStart(2, "0");
   const ss = String(sec % 60).padStart(2, "0");
@@ -54,6 +61,7 @@ export default function VoiceAssistant() {
   const callId = useRef<string>("");
   const displayId = useRef<string>("HSP-—");
   const callStartedAt = useRef<number>(0);
+  const greetingAudioRef = useRef<Record<string, HTMLAudioElement>>({});
 
   // Initialise random IDs on client only to avoid SSR/hydration mismatch
   useEffect(() => {
@@ -62,6 +70,16 @@ export default function VoiceAssistant() {
       displayId.current = `HSP-${Math.floor(1000 + Math.random() * 9000)}`;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Preload greeting WAV files so they're in browser cache before the user clicks.
+  useEffect(() => {
+    const audios: Record<string, HTMLAudioElement> = {
+      "hi-IN": new Audio("/greetings/hi-IN.wav"),
+      "mr-IN": new Audio("/greetings/mr-IN.wav"),
+    };
+    Object.values(audios).forEach((a) => a.load());
+    greetingAudioRef.current = audios;
   }, []);
 
   const isInCall = callStatus !== "idle" && callStatus !== "ended" && callStatus !== "call_dropped";
@@ -87,6 +105,20 @@ export default function VoiceAssistant() {
 
   const startCall = useCallback(async () => {
     log.info("Starting call", { preferredLang, room: callId.current });
+
+    // Play cached greeting instantly — no network round-trip needed.
+    // "auto" falls back to Hindi (the backend default).
+    const greetingLang = preferredLang === "auto" ? "hi-IN" : preferredLang;
+    const greetingText = GREETING_TEXT[greetingLang];
+    const audio = greetingAudioRef.current[greetingLang];
+    if (audio) {
+      audio.currentTime = 0;
+      audio.play().catch((e) => log.warn("Cached greeting playback blocked", { error: String(e) }));
+    }
+    if (greetingText) {
+      setTranscript([{ role: "assistant", content: greetingText, timestamp: Date.now() }]);
+    }
+
     setCallStatus("connecting");
     try {
       const res = await fetch("/api/token", {

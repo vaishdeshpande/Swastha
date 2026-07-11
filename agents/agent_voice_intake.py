@@ -39,7 +39,7 @@ from agents.prompts.voice_intake import build_voice_intake_prompt
 from agents.state import AgentState
 from agents.tools.db_tools import check_available_slots, get_patient_record, register_patient
 from agents.tools.intent_classifier import run_intent_fanout
-from agents.tools.llm_json import extract_json
+from agents.tools.llm_json import extract_json, extract_reply_text
 from agents.tools.redis_tools import cache_slots
 from agents.tools.translate_tools import translate_text
 
@@ -50,6 +50,16 @@ logger = logging.getLogger(__name__)
 client = SarvamAI(api_subscription_key=os.environ["SARVAM_API_KEY"])
 
 MAX_INTAKE_ATTEMPTS = 3
+
+# Hard ceiling on any single sarvam-30b call. Measured latency is 2-14s;
+# beyond this the patient hears dead air — better to apologise and re-ask
+# than hang the turn (Scenario 2/3 field reports: 30-60s silences).
+LLM_TIMEOUT_S = 20.0
+
+# Spoken when the LLM output is unusable (timeout or unparseable twice).
+# Hindi source — voice_intake_node's translation guardrail converts it for
+# mr-IN and other languages.
+_SAFE_RETRY_REPLY_HI = "माफ़ कीजिए, मुझे ठीक से समझ नहीं आया। कृपया दोबारा बताइए?"
 
 # Scenario 4 fanout costs a full extra sarvam-30b round trip (~2-14s measured,
 # reasoning tokens included) to sometimes save one clarifying question — a net
@@ -208,7 +218,13 @@ async def _extract_patient_info(
 
     try:
         # ── Scenario 3: streaming path (non-blocking via to_thread) ─────────
-        accumulated, early_phone = await asyncio.to_thread(_sync_stream_extract, full_messages)
+        try:
+            accumulated, early_phone = await asyncio.wait_for(
+                asyncio.to_thread(_sync_stream_extract, full_messages), timeout=LLM_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            logger.error("voice_intake: LLM stream timed out after %.0fs — safe retry reply", LLM_TIMEOUT_S)
+            return {"reply": _SAFE_RETRY_REPLY_HI, "intent": None}, None
 
         # Scenario 1: fire background DB lookup right after stream completes
         if early_phone and session_id not in _bg_tasks:
@@ -218,6 +234,14 @@ async def _extract_patient_info(
 
         parsed = extract_json(accumulated)
         if parsed is None:
+            # Salvage the "reply" value out of malformed JSON before spending a
+            # full extra sarvam-30b round trip (2-14s). Raw JSON must NEVER be
+            # spoken to the patient (Scenario 1 field report).
+            salvaged = extract_reply_text(accumulated)
+            if salvaged:
+                logger.warning("voice_intake: JSON malformed, salvaged reply text — skipping LLM retry")
+                return {"reply": salvaged, "intent": None}, phone_task
+
             # sarvam-30b drops the JSON wrapper ~30-50% of the time on this
             # prompt (measured via evals, temperature-independent). One retry
             # with an explicit instruction recovers most of these — without it
@@ -236,25 +260,46 @@ async def _extract_patient_info(
                     ),
                 },
             ]
-            retry_reply = await asyncio.to_thread(_sync_batch_extract, retry_messages)
+            try:
+                retry_reply = await asyncio.wait_for(
+                    asyncio.to_thread(_sync_batch_extract, retry_messages), timeout=LLM_TIMEOUT_S
+                )
+            except asyncio.TimeoutError:
+                logger.error("voice_intake: JSON retry timed out — safe retry reply")
+                return {"reply": _SAFE_RETRY_REPLY_HI, "intent": None}, phone_task
             parsed = extract_json(retry_reply)
             if parsed is None:
-                logger.warning("voice_intake: retry still not JSON, treating first reply as clarification")
-                return {"reply": accumulated, "intent": None}, phone_task
+                logger.warning("voice_intake: retry still not JSON — safe retry reply (never speak raw JSON)")
+                # Only speak the first reply if it contains no JSON syntax at all
+                # (a plain conversational clarification); otherwise use the safe ask.
+                if "{" not in accumulated and '"' not in accumulated:
+                    return {"reply": accumulated, "intent": None}, phone_task
+                return {"reply": _SAFE_RETRY_REPLY_HI, "intent": None}, phone_task
             logger.info("voice_intake: JSON retry succeeded")
         return parsed, phone_task
 
     except (AttributeError, TypeError, NotImplementedError):
         # ── Fallback: non-streaming, also non-blocking ────────────────────────
         logger.info("voice_intake: sarvam SDK does not support streaming — falling back to batch call")
-        reply = await asyncio.to_thread(_sync_batch_extract, full_messages)
+        try:
+            reply = await asyncio.wait_for(
+                asyncio.to_thread(_sync_batch_extract, full_messages), timeout=LLM_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            logger.error("voice_intake: batch LLM call timed out — safe retry reply")
+            return {"reply": _SAFE_RETRY_REPLY_HI, "intent": None}, None
         if not reply:
             logger.warning("voice_intake: API returned empty/None content")
             return {"reply": None, "intent": None}, None
         parsed = extract_json(reply)
         if parsed is None:
             logger.warning("voice_intake: batch reply not parseable JSON: %r", reply[:200])
-            return {"reply": reply, "intent": None}, None
+            salvaged = extract_reply_text(reply)
+            if salvaged:
+                return {"reply": salvaged, "intent": None}, None
+            if "{" not in reply and '"' not in reply:
+                return {"reply": reply, "intent": None}, None
+            return {"reply": _SAFE_RETRY_REPLY_HI, "intent": None}, None
 
         phone = parsed.get("phone")
         if phone and session_id not in _bg_tasks:

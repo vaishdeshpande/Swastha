@@ -256,6 +256,23 @@ class HospitalReceptionistAgent(Agent):
                 last_msg.get("role"), self.state.get("call_id"),
             )
 
+        # ── Guardrail 0: never speak JSON syntax ──────────────────────────────
+        # Final defence: if a malformed/truncated LLM JSON object slipped
+        # through an agent as the reply text, extract its spoken "reply" value
+        # so the patient never hears braces and key names read aloud.
+        if reply and ("{" in reply or '"reply"' in reply):
+            from agents.tools.llm_json import extract_reply_text
+            salvaged = extract_reply_text(reply)
+            logger.warning(
+                "GUARDRAIL[json_leak]: reply contained JSON syntax — %s (call_id=%s)",
+                "salvaged spoken text" if salvaged else "no salvageable text, using fallback",
+                self.state.get("call_id"),
+            )
+            reply = salvaged or await translate_text(
+                "Sorry, could you please repeat that?",
+                source_lang="en-IN", target_lang=self.state.get("lang_code", "hi-IN"),
+            )
+
         # ── Guardrail 4: Medical boundary check (prescription agent only) ─────
         if reply and self.state.get("current_agent") == "prescription":
             reply = await self._check_medical_boundary(reply)
@@ -554,14 +571,9 @@ async def entrypoint(ctx: JobContext) -> None:
 
     await session.start(agent=agent, room=ctx.room)
 
-    # Speak the greeting in the pre-detected/default language immediately on connect.
-    # load_language_config pulls the greeting string from config/languages.yaml so
-    # adding a new language there automatically gives it a custom greeting too.
-    from agents.tools.language_config import load_language_config
-    greeting = load_language_config(agent.state["lang_code"]).get(
-        "greeting", "नमस्ते! मैं आपकी कैसे मदद कर सकती हूँ?"
-    )
-    await session.say(greeting, allow_interruptions=True)
+    # Greeting is pre-synthesized and played instantly by the frontend the moment
+    # the user clicks "Start Call" (frontend/public/greetings/<lang>.wav).
+    # Calling session.say() here would produce a duplicate ~6-7s later — skip it.
 
 
 if __name__ == "__main__":

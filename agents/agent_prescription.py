@@ -43,11 +43,23 @@ async def _answer_prescription_query(state: AgentState, prescription_context: di
         )
         return r.choices[0].message.content or ""
 
-    reply = await _asyncio.to_thread(_sync_call)
+    try:
+        reply = await _asyncio.wait_for(_asyncio.to_thread(_sync_call), timeout=20.0)
+    except _asyncio.TimeoutError:
+        logger.error("prescription: LLM call timed out — escalating instead of hanging")
+        return {"reply": None, "escalate": True}
     parsed = extract_json(reply)
 
     if parsed is not None:
         return parsed
+
+    # Salvage the "reply" value out of malformed JSON before spending a full
+    # extra LLM round trip (2-14s of dead air for the patient).
+    from agents.tools.llm_json import extract_reply_text
+    salvaged = extract_reply_text(reply)
+    if salvaged:
+        logger.warning("prescription: JSON malformed, salvaged reply text — skipping LLM retry")
+        return {"reply": salvaged, "escalate": False}
 
     # First attempt returned unparseable output — retry with explicit JSON instruction
     logger.warning("prescription: LLM reply not parseable JSON (attempt 1), retrying: %r", reply[:200])
@@ -70,7 +82,11 @@ async def _answer_prescription_query(state: AgentState, prescription_context: di
         )
         return r.choices[0].message.content or ""
 
-    retry_reply = await _asyncio.to_thread(_sync_retry)
+    try:
+        retry_reply = await _asyncio.wait_for(_asyncio.to_thread(_sync_retry), timeout=20.0)
+    except _asyncio.TimeoutError:
+        logger.error("prescription: LLM retry timed out — escalating")
+        return {"reply": None, "escalate": True}
     parsed = extract_json(retry_reply)
 
     if parsed is not None:

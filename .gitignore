@@ -24,3 +24,12 @@ voice/__pycache__/*
 evals/__pycache__/run_eval.cpython-311.pyc
 
 node_modules/*
+iac/.logs/*
+iac/.pids/*
+agents/prompts/.DS_Store
+agents/tools/.DS_Store
+agents/.DS_Store
+agents/.DS_Store
+agents/.DS_Store
+.DS_Store
+agents/.DS_Store

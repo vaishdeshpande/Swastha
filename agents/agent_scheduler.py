@@ -11,7 +11,7 @@ import os
 from langsmith import traceable
 from sarvamai import SarvamAI
 
-from agents.prompts.scheduler import build_scheduler_prompt
+from agents.prompts.scheduler import KNOWN_DEPARTMENTS, build_scheduler_prompt, normalize_department
 from agents.state import AgentState
 from agents.tools.db_tools import (
     book_slot,
@@ -94,10 +94,19 @@ async def _decide_scheduler_action(state: AgentState) -> dict:
         return r.choices[0].message.content or ""
 
     import asyncio as _asyncio
-    reply = await _asyncio.to_thread(_sync_call)
+    try:
+        reply = await _asyncio.wait_for(_asyncio.to_thread(_sync_call), timeout=20.0)
+    except _asyncio.TimeoutError:
+        logger.error("scheduler: LLM decision timed out — falling back to clarify")
+        return {"action": "clarify", "reply": None, "distress": False}
     parsed = extract_json(reply)
     if parsed is None:
         logger.warning("scheduler: LLM reply wasn't parseable JSON, treating as clarification: %r", reply)
+        # Never let raw JSON syntax reach TTS — clarify with reply=None so the
+        # node generates a clean confirmation question instead.
+        if "{" in reply or '"' in reply:
+            from agents.tools.llm_json import extract_reply_text
+            reply = extract_reply_text(reply)
         return {"action": "clarify", "reply": reply, "distress": False}
     return parsed
 
@@ -149,6 +158,24 @@ async def scheduler_node(state: AgentState) -> AgentState:
 
     if action == "check_slots":
         date = decision.get("date") or "any"
+        raw_dept = state.get("department") or "general"
+        dept = normalize_department(raw_dept)
+        if dept != raw_dept:
+            logger.info("scheduler: normalized department %r → %r", raw_dept, dept)
+            state = {**state, "department": dept}
+
+        # Unknown department — tell the patient and offer general physician instead.
+        if dept == "unknown":
+            logger.info("scheduler: unknown department=%r — offering general physician", raw_dept)
+            unknown_msg_en = (
+                f"I'm sorry, we don't have a {raw_dept} department at Apollo Hospitals. "
+                "However, our General Physician can evaluate you and refer you to the right specialist. "
+                "Would you like me to book an appointment with our General Physician?"
+            )
+            dept = "general"
+            reply = await translate_text(unknown_msg_en, source_lang="en-IN", target_lang=lang_code)
+            messages.append({"role": "assistant", "content": reply})
+            return {**state, "messages": messages, "department": "general"}
 
         # Scenario 2: read pre-fetched cache written by voice_intake (sub-10ms vs Supabase)
         slots = await get_cached_slots(state["department"], date)

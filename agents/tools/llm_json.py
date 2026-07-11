@@ -43,5 +43,56 @@ def extract_json(text: str) -> dict | None:
         except json.JSONDecodeError:
             pass
 
+    repaired = _repair_truncated(text)
+    if repaired is not None:
+        logger.info("llm_json: recovered truncated JSON via repair")
+        return repaired
+
     logger.warning("llm_json: could not extract JSON from LLM reply (%d chars)", len(text))
     return None
+
+
+def _repair_truncated(text: str) -> dict | None:
+    """Attempt to repair a JSON object cut off mid-stream (e.g. max_tokens hit
+    or the model stopped early): close an open string, strip a trailing comma,
+    and balance braces."""
+    start = text.find("{")
+    if start == -1:
+        return None
+    fragment = text[start:]
+
+    # Close an unterminated string (count unescaped quotes)
+    quote_count = len(re.findall(r'(?<!\\)"', fragment))
+    if quote_count % 2 == 1:
+        fragment += '"'
+
+    fragment = re.sub(r",\s*$", "", fragment.rstrip())
+    open_braces = fragment.count("{") - fragment.count("}")
+    if open_braces > 0:
+        fragment += "}" * open_braces
+
+    try:
+        result = json.loads(fragment)
+        return result if isinstance(result, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+_REPLY_VALUE_RE = re.compile(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)', re.DOTALL)
+
+
+def extract_reply_text(text: str) -> str | None:
+    """Last-resort salvage: pull the value of the "reply" key out of malformed
+    JSON so raw JSON syntax is never spoken to the patient."""
+    if not text:
+        return None
+    match = _REPLY_VALUE_RE.search(text)
+    if not match:
+        return None
+    value = match.group(1)
+    try:
+        value = json.loads(f'"{value}"')  # unescape \n, \", unicode escapes
+    except json.JSONDecodeError:
+        pass
+    value = value.strip()
+    return value or None

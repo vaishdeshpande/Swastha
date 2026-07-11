@@ -1,11 +1,85 @@
 from __future__ import annotations
 
+# All departments that have doctors in the hospital.
+# When a patient requests a department NOT in this set, the scheduler
+# tells them we don't have it and offers a general physician instead.
+KNOWN_DEPARTMENTS = {
+    "general", "cardiology", "ortho", "pediatrics", "dermatology",
+    "gynecology", "neurology", "ent", "ophthalmology", "psychiatry",
+    "oncology", "nephrology", "endocrinology", "gastroenterology", "pulmonology",
+}
+
+# Maps patient/LLM phrasings → canonical department key.
+# Add more aliases here when new synonyms show up in call logs.
+_DEPARTMENT_ALIASES: dict[str, str] = {
+    # ortho variants
+    "orthopedics": "ortho", "orthopaedics": "ortho", "orthopedic": "ortho",
+    "bone": "ortho", "spine": "ortho", "joint": "ortho", "hadi": "ortho",
+    # cardiology
+    "heart": "cardiology", "cardiac": "cardiology", "dil": "cardiology",
+    # pediatrics
+    "child": "pediatrics", "children": "pediatrics", "bacha": "pediatrics",
+    "baby": "pediatrics", "kids": "pediatrics",
+    # gynecology
+    "gynaecology": "gynecology", "women": "gynecology", "obstetrics": "gynecology",
+    # ent
+    "ear": "ent", "nose": "ent", "throat": "ent", "ear nose throat": "ent",
+    # neurology
+    "brain": "neurology", "dimag": "neurology", "neuro": "neurology",
+    # dermatology
+    "skin": "dermatology", "twacha": "dermatology",
+    # ophthalmology
+    "eye": "ophthalmology", "aankh": "ophthalmology", "eyes": "ophthalmology",
+    # gastroenterology
+    "stomach": "gastroenterology", "pet": "gastroenterology", "gut": "gastroenterology",
+    "digestion": "gastroenterology", "liver": "gastroenterology",
+    # pulmonology
+    "lung": "pulmonology", "lungs": "pulmonology", "breathing": "pulmonology",
+    "respiratory": "pulmonology", "sans": "pulmonology",
+    # general fallbacks
+    "physician": "general", "doctor": "general", "medicine": "general",
+}
+
+
+def normalize_department(dept: str | None) -> str:
+    """Map free-form patient/LLM department strings to a canonical key.
+
+    Tries exact match first, then alias lookup, then substring scan against
+    known keys and aliases. Falls back to 'general' rather than returning
+    an unknown key that would silently fail DB queries.
+    """
+    if not dept:
+        return "general"
+    d = dept.strip().lower()
+    if d in KNOWN_DEPARTMENTS:
+        return d
+    if d in _DEPARTMENT_ALIASES:
+        return _DEPARTMENT_ALIASES[d]
+    # substring scan — catches "orthopedics surgeon", "heart specialist", etc.
+    for alias, canonical in _DEPARTMENT_ALIASES.items():
+        if alias in d:
+            return canonical
+    for known in KNOWN_DEPARTMENTS:
+        if known in d:
+            return known
+    return "unknown"  # caller decides how to handle truly unknown depts
+
 _DEPARTMENT_LABELS = {
     "general": "general physician",
     "cardiology": "cardiologist",
     "ortho": "orthopedic specialist",
     "pediatrics": "pediatrician",
     "dermatology": "dermatologist",
+    "gynecology": "gynecologist",
+    "neurology": "neurologist",
+    "ent": "ENT specialist",
+    "ophthalmology": "ophthalmologist",
+    "psychiatry": "psychiatrist",
+    "oncology": "oncologist",
+    "nephrology": "nephrologist",
+    "endocrinology": "endocrinologist",
+    "gastroenterology": "gastroenterologist",
+    "pulmonology": "pulmonologist",
 }
 
 SCHEDULER_SYSTEM_PROMPT = """\
@@ -93,7 +167,9 @@ For check_slots, confirm_booking, cancel, reschedule — set reply=null (the bac
 
 
 def build_scheduler_prompt(lang_code: str, department: str | None, offered_slots: list[dict] | None) -> str:
-    dept = department or "general"
+    dept = normalize_department(department)
+    if dept == "unknown":
+        dept = "general"
     return SCHEDULER_SYSTEM_PROMPT.format(
         lang_code=lang_code,
         department=dept,

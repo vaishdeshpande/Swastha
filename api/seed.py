@@ -11,11 +11,21 @@ from api.database import async_session, init_database
 from api.models import Appointment, Bill, Doctor, DischargeFollowup, LabReport, Patient, Prescription
 
 DOCTORS = [
-    {"name": "Dr. Priya Sharma", "department": "general", "qualification": "MBBS, MD", "available_days": ["monday", "wednesday", "friday"]},
-    {"name": "Dr. Rajesh Patel", "department": "cardiology", "qualification": "MBBS, DM Cardiology", "available_days": ["tuesday", "thursday"]},
-    {"name": "Dr. Anjali Deshmukh", "department": "ortho", "qualification": "MBBS, MS Ortho", "available_days": ["monday", "thursday", "saturday"]},
-    {"name": "Dr. Vikram Singh", "department": "pediatrics", "qualification": "MBBS, DCH", "available_days": ["wednesday", "friday"]},
-    {"name": "Dr. Meera Joshi", "department": "dermatology", "qualification": "MBBS, MD Dermatology", "available_days": ["tuesday", "saturday"]},
+    {"name": "Dr. Priya Sharma",      "department": "general",          "qualification": "MBBS, MD",                   "available_days": ["monday", "wednesday", "friday"]},
+    {"name": "Dr. Rajesh Patel",      "department": "cardiology",       "qualification": "MBBS, DM Cardiology",        "available_days": ["tuesday", "thursday"]},
+    {"name": "Dr. Anjali Deshmukh",   "department": "ortho",            "qualification": "MBBS, MS Ortho",             "available_days": ["monday", "thursday", "saturday"]},
+    {"name": "Dr. Vikram Singh",      "department": "pediatrics",       "qualification": "MBBS, DCH",                  "available_days": ["wednesday", "friday"]},
+    {"name": "Dr. Meera Joshi",       "department": "dermatology",      "qualification": "MBBS, MD Dermatology",       "available_days": ["tuesday", "saturday"]},
+    {"name": "Dr. Kavita Nair",       "department": "gynecology",       "qualification": "MBBS, MS Gynecology",        "available_days": ["monday", "wednesday", "saturday"]},
+    {"name": "Dr. Suresh Menon",      "department": "neurology",        "qualification": "MBBS, DM Neurology",         "available_days": ["tuesday", "friday"]},
+    {"name": "Dr. Anita Saxena",      "department": "ent",              "qualification": "MBBS, MS ENT",               "available_days": ["monday", "thursday"]},
+    {"name": "Dr. Ravi Kumar",        "department": "ophthalmology",    "qualification": "MBBS, MS Ophthalmology",     "available_days": ["wednesday", "saturday"]},
+    {"name": "Dr. Pooja Mehta",       "department": "psychiatry",       "qualification": "MBBS, MD Psychiatry",        "available_days": ["tuesday", "thursday"]},
+    {"name": "Dr. Amit Chandra",      "department": "oncology",         "qualification": "MBBS, DM Oncology",          "available_days": ["monday", "wednesday"]},
+    {"name": "Dr. Sundar Rao",        "department": "nephrology",       "qualification": "MBBS, DM Nephrology",        "available_days": ["tuesday", "friday"]},
+    {"name": "Dr. Preethi Krishnan",  "department": "endocrinology",    "qualification": "MBBS, DM Endocrinology",     "available_days": ["monday", "thursday", "saturday"]},
+    {"name": "Dr. Harish Gupta",      "department": "gastroenterology", "qualification": "MBBS, DM Gastroenterology", "available_days": ["wednesday", "friday"]},
+    {"name": "Dr. Namrata Singh",     "department": "pulmonology",      "qualification": "MBBS, MD Pulmonology",       "available_days": ["tuesday", "saturday"]},
 ]
 
 PATIENTS = [
@@ -46,8 +56,7 @@ async def seed():
         session.add_all(patients)
         await session.flush()
 
-        # 20 open slots: next 5 weekdays x 4 slots each, department rotating
-        # through the 5 doctors above.
+        # Open slots: next 5 weekdays x 4 slots each x all 15 doctors.
         appointments = []
         day = datetime.utcnow().date()
         weekdays_added = 0
@@ -55,18 +64,21 @@ async def seed():
             day += timedelta(days=1)
             if day.weekday() >= 5:  # skip Sat/Sun
                 continue
-            for i, slot_time in enumerate(SLOT_TIMES):
-                doctor = doctors[weekdays_added % len(doctors)]
-                appointments.append(
-                    Appointment(
-                        doctor_id=doctor.id,
-                        doctor_name=doctor.name,
-                        department=doctor.department,
-                        slot_date=day.isoformat(),
-                        slot_time=slot_time,
-                        status="open",
+            day_name = day.strftime("%A").lower()
+            for doctor in doctors:
+                if day_name not in doctor.available_days:
+                    continue
+                for slot_time in SLOT_TIMES:
+                    appointments.append(
+                        Appointment(
+                            doctor_id=doctor.id,
+                            doctor_name=doctor.name,
+                            department=doctor.department,
+                            slot_date=day.isoformat(),
+                            slot_time=slot_time,
+                            status="open",
+                        )
                     )
-                )
             weekdays_added += 1
         session.add_all(appointments)
 
@@ -186,7 +198,7 @@ async def seed():
 
         await session.commit()
 
-    print("Seed complete: 5 doctors, 10 patients, 20 slots, 3 prescriptions, 2 discharge followups, 3 lab reports, 2 bills")
+    print("Seed complete: 15 doctors, 10 patients, slots per available day, 3 prescriptions, 2 discharge followups, 3 lab reports, 2 bills")
 
 
 if __name__ == "__main__":

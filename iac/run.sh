@@ -184,7 +184,7 @@ ok "LiveKit agent started (pid $LIVEKIT_PID) — logs: iac/.logs/livekit.log"
 # 3. Next.js frontend
 info "Starting Next.js frontend on http://localhost:3000 ..."
 cd "$ROOT/frontend"
-npm run dev \
+PORT=3000 npm run dev \
     > "$LOG_DIR/frontend.log" 2>&1 &
 FRONTEND_PID=$!
 echo "$FRONTEND_PID" > "$PID_DIR/frontend.pid"
