@@ -93,6 +93,17 @@ export default function VoiceAssistant() {
     return () => clearInterval(id);
   }, [isInCall]);
 
+  // The greeting plays as a local HTMLAudioElement outside the LiveKit room,
+  // so ending/dropping the call does not stop it automatically.
+  const stopGreetingAudio = useCallback(() => {
+    Object.values(greetingAudioRef.current).forEach((audio) => {
+      if (!audio.paused) {
+        audio.pause();
+        audio.currentTime = 0;
+      }
+    });
+  }, []);
+
   const resetCallState = useCallback(() => {
     setTranscript([]);
     setActiveAgent(null);
@@ -136,14 +147,16 @@ export default function VoiceAssistant() {
       setToken(data.token);
     } catch (err) {
       log.error("Failed to start call", { error: err instanceof Error ? err.message : String(err) });
+      stopGreetingAudio();
       setCallStatus("idle");
     }
-  }, [preferredLang]);
+  }, [preferredLang, stopGreetingAudio]);
 
   const endCall = useCallback(() => {
     log.info("User ended call");
+    stopGreetingAudio();
     setCallStatus("ending");
-  }, []);
+  }, [stopGreetingAudio]);
 
   const logDroppedCall = useCallback(async (reason?: string) => {
     try {
@@ -162,6 +175,7 @@ export default function VoiceAssistant() {
 
   const handleDisconnect = useCallback(
     (reason?: DisconnectReason) => {
+      stopGreetingAudio();
       const durationSec = (Date.now() - callStartedAt.current) / 1000;
       setCallStatus((current) => {
         const userInitiated = current === "ending";
@@ -177,7 +191,7 @@ export default function VoiceAssistant() {
         return "call_dropped";
       });
     },
-    [completedAgents, logDroppedCall, preferredLang],
+    [completedAgents, logDroppedCall, preferredLang, stopGreetingAudio],
   );
 
   const handleTranscript = useCallback((msg: TranscriptMessage) => {
@@ -212,6 +226,7 @@ export default function VoiceAssistant() {
   }, [startCall, resetCallState]);
 
   const simulateDrop = useCallback(() => {
+    stopGreetingAudio();
     setSummary({
       durationSec: elapsedSec,
       lang: preferredLang,
@@ -221,7 +236,7 @@ export default function VoiceAssistant() {
     });
     setToken(null);
     setCallStatus("call_dropped");
-  }, [elapsedSec, preferredLang, completedAgents]);
+  }, [elapsedSec, preferredLang, completedAgents, stopGreetingAudio]);
 
   return (
     <div className="neo-screen">
