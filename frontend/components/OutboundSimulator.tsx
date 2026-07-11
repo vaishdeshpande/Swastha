@@ -223,8 +223,8 @@ type SpeechRecognitionEvent = { results: { [i: number]: { [j: number]: { transcr
 
 function createRecognition(lang: string): SpeechRecognitionInstance | null {
   if (typeof window === "undefined") return null;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const SR = (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition;
+  const w = window as unknown as Record<string, unknown>;
+  const SR = (w.SpeechRecognition ?? w.webkitSpeechRecognition) as (new () => SpeechRecognitionInstance) | undefined;
   if (!SR) return null;
   const rec = new SR() as SpeechRecognitionInstance;
   rec.lang = lang;
