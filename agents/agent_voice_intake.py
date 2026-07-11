@@ -37,7 +37,7 @@ from sarvamai import SarvamAI
 
 from agents.prompts.voice_intake import build_voice_intake_prompt
 from agents.state import AgentState
-from agents.tools.db_tools import check_available_slots, get_patient_record, register_patient
+from agents.tools.db_tools import check_available_slots, get_hospital_availability, get_patient_record, register_patient
 from agents.tools.intent_classifier import run_intent_fanout
 from agents.tools.llm_json import extract_json, extract_reply_text
 from agents.tools.redis_tools import cache_slots
@@ -56,10 +56,11 @@ MAX_INTAKE_ATTEMPTS = 3
 # than hang the turn (Scenario 2/3 field reports: 30-60s silences).
 LLM_TIMEOUT_S = 20.0
 
-# Spoken when the LLM output is unusable (timeout or unparseable twice).
-# Hindi source — voice_intake_node's translation guardrail converts it for
-# mr-IN and other languages.
-_SAFE_RETRY_REPLY_HI = "माफ़ कीजिए, मुझे ठीक से समझ नहीं आया। कृपया दोबारा बताइए?"
+# Sentinel returned when the LLM is unrecoverable (double timeout or double
+# JSON parse failure). livekit_agent.py intercepts this flag and plays a
+# pre-recorded fallback WAV instead of calling TTS — more reliable at the
+# moment of failure and sounds more natural than a synthesised apology.
+_FALLBACK_WAV_SENTINEL = {"use_fallback_wav": True, "intent": None}
 
 # Scenario 4 fanout costs a full extra sarvam-30b round trip (~2-14s measured,
 # reasoning tokens included) to sometimes save one clarifying question — a net
@@ -224,7 +225,7 @@ async def _extract_patient_info(
             )
         except asyncio.TimeoutError:
             logger.error("voice_intake: LLM stream timed out after %.0fs — safe retry reply", LLM_TIMEOUT_S)
-            return {"reply": _SAFE_RETRY_REPLY_HI, "intent": None}, None
+            return _FALLBACK_WAV_SENTINEL, None
 
         # Scenario 1: fire background DB lookup right after stream completes
         if early_phone and session_id not in _bg_tasks:
@@ -241,6 +242,14 @@ async def _extract_patient_info(
             if salvaged:
                 logger.warning("voice_intake: JSON malformed, salvaged reply text — skipping LLM retry")
                 return {"reply": salvaged, "intent": None}, phone_task
+
+            # Plain prose (no JSON syntax at all) → speak it directly.
+            # This happens when sarvam-30b answers conversationally in Romanized
+            # Hindi/Marathi without wrapping in JSON.  Retrying costs 20s and
+            # ends in escalation; using the text directly is always better.
+            if "{" not in accumulated and '"' not in accumulated:
+                logger.info("voice_intake: plain-prose reply (no JSON syntax) — using directly")
+                return {"reply": accumulated.strip(), "intent": None}, phone_task
 
             # sarvam-30b drops the JSON wrapper ~30-50% of the time on this
             # prompt (measured via evals, temperature-independent). One retry
@@ -266,7 +275,7 @@ async def _extract_patient_info(
                 )
             except asyncio.TimeoutError:
                 logger.error("voice_intake: JSON retry timed out — safe retry reply")
-                return {"reply": _SAFE_RETRY_REPLY_HI, "intent": None}, phone_task
+                return _FALLBACK_WAV_SENTINEL, phone_task
             parsed = extract_json(retry_reply)
             if parsed is None:
                 logger.warning("voice_intake: retry still not JSON — safe retry reply (never speak raw JSON)")
@@ -274,7 +283,7 @@ async def _extract_patient_info(
                 # (a plain conversational clarification); otherwise use the safe ask.
                 if "{" not in accumulated and '"' not in accumulated:
                     return {"reply": accumulated, "intent": None}, phone_task
-                return {"reply": _SAFE_RETRY_REPLY_HI, "intent": None}, phone_task
+                return _FALLBACK_WAV_SENTINEL, phone_task
             logger.info("voice_intake: JSON retry succeeded")
         return parsed, phone_task
 
@@ -287,7 +296,7 @@ async def _extract_patient_info(
             )
         except asyncio.TimeoutError:
             logger.error("voice_intake: batch LLM call timed out — safe retry reply")
-            return {"reply": _SAFE_RETRY_REPLY_HI, "intent": None}, None
+            return _FALLBACK_WAV_SENTINEL, None
         if not reply:
             logger.warning("voice_intake: API returned empty/None content")
             return {"reply": None, "intent": None}, None
@@ -299,7 +308,7 @@ async def _extract_patient_info(
                 return {"reply": salvaged, "intent": None}, None
             if "{" not in reply and '"' not in reply:
                 return {"reply": reply, "intent": None}, None
-            return {"reply": _SAFE_RETRY_REPLY_HI, "intent": None}, None
+            return _FALLBACK_WAV_SENTINEL, None
 
         phone = parsed.get("phone")
         if phone and session_id not in _bg_tasks:
@@ -343,6 +352,17 @@ async def voice_intake_node(state: AgentState) -> AgentState:
     extracted, phone_task = await _extract_patient_info(
         state["messages"], lang_code, collected, session_id
     )
+
+    # Unrecoverable LLM failure — bubble the flag up to livekit_agent.py which
+    # will play the pre-recorded fallback WAV and escalate without calling TTS.
+    if extracted.get("use_fallback_wav"):
+        logger.error("voice_intake: LLM unrecoverable — returning fallback WAV sentinel (session_id=%s)", session_id)
+        return {
+            **state,
+            "use_fallback_wav": True,
+            "escalation_required": True,
+            "escalation_reason": "LLM unrecoverable after retries",
+        }
 
     for field in _INTAKE_FIELDS:
         new_val = extracted.get(field)
@@ -524,10 +544,29 @@ async def voice_intake_node(state: AgentState) -> AgentState:
         asyncio.create_task(_prefetch_slots(department))
         logger.info("voice_intake: fired slot pre-fetch for department=%s", department)
 
+    # Hospital-wide availability fetch — fires once per booking call.
+    # Runs in background; result awaited below before returning state.
+    # Gives the scheduler LLM a full picture of all 15 departments so it
+    # can answer "koi aur department hai?" without extra DB calls.
+    availability_task = None
+    if intent == "book" and not state.get("hospital_availability"):
+        availability_task = asyncio.create_task(get_hospital_availability())
+        logger.info("voice_intake: fired hospital_availability fetch")
+
     logger.info(
         "voice_intake: resolved intent=%s department=%s urgency=%s patient_id=%s",
         intent, department, collected.get("urgency", "normal"), patient_id,
     )
+
+    # Await hospital availability if it was fetched this turn (usually already done
+    # by the time patient_id resolution completes — overlap is the point).
+    hospital_availability = state.get("hospital_availability")
+    if availability_task is not None:
+        try:
+            hospital_availability = await asyncio.wait_for(availability_task, timeout=5.0)
+            logger.info("voice_intake: hospital_availability fetched successfully")
+        except Exception:
+            logger.exception("voice_intake: hospital_availability fetch failed (non-fatal)")
 
     return {
         **state,
@@ -540,4 +579,5 @@ async def voice_intake_node(state: AgentState) -> AgentState:
         "intake_collected": collected,
         "optimistic_patient_id": state.get("optimistic_patient_id"),
         "prefetched_slots": True if (intent == "book" and department) else state.get("prefetched_slots"),
+        "hospital_availability": hospital_availability,
     }

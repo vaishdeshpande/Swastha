@@ -119,28 +119,58 @@ async def register_patient(name: str, phone: str, age: int, lang_pref: str) -> s
 # Appointments — used by Agent 3 (Scheduler)
 # ---------------------------------------------------------------------------
 
-VALID_DEPARTMENTS = ["general", "cardiology", "ortho", "pediatrics", "dermatology"]
+VALID_DEPARTMENTS = [
+    "general", "cardiology", "ortho", "pediatrics", "dermatology",
+    "gynecology", "neurology", "ent", "ophthalmology", "psychiatry",
+    "oncology", "nephrology", "endocrinology", "gastroenterology", "pulmonology",
+]
 
 _DEPARTMENT_SYNONYMS = {
-    "general": "general",
-    "general physician": "general",
-    "physician": "general",
-    "gp": "general",
-    "cardiologist": "cardiology",
-    "cardiology": "cardiology",
-    "heart": "cardiology",
-    "orthopedic": "ortho",
-    "orthopedics": "ortho",
-    "ortho": "ortho",
-    "bone": "ortho",
-    "joint": "ortho",
-    "pediatric": "pediatrics",
-    "pediatrics": "pediatrics",
-    "paediatrics": "pediatrics",
-    "child": "pediatrics",
-    "dermatologist": "dermatology",
-    "dermatology": "dermatology",
-    "skin": "dermatology",
+    # general
+    "general physician": "general", "physician": "general", "gp": "general",
+    "medicine": "general", "doctor": "general",
+    # cardiology
+    "cardiologist": "cardiology", "heart": "cardiology", "cardiac": "cardiology",
+    "dil": "cardiology",
+    # ortho
+    "orthopedic": "ortho", "orthopedics": "ortho", "orthopaedics": "ortho",
+    "bone": "ortho", "joint": "ortho", "spine": "ortho", "hadi": "ortho",
+    # pediatrics
+    "pediatric": "pediatrics", "paediatrics": "pediatrics", "child": "pediatrics",
+    "baby": "pediatrics", "bacha": "pediatrics",
+    # dermatology
+    "dermatologist": "dermatology", "skin": "dermatology", "twacha": "dermatology",
+    # gynecology
+    "gynaecology": "gynecology", "gynec": "gynecology", "gynae": "gynecology",
+    "women": "gynecology", "mahila": "gynecology", "obstetrics": "gynecology",
+    "stri rog": "gynecology",
+    # neurology
+    "neurologist": "neurology", "brain": "neurology", "dimag": "neurology",
+    "neuro": "neurology", "fits": "neurology",
+    # ent
+    "ear nose throat": "ent", "ear": "ent", "nose": "ent", "throat": "ent",
+    "kaan": "ent", "naak": "ent", "gala": "ent", "tonsils": "ent",
+    # ophthalmology
+    "eye": "ophthalmology", "eyes": "ophthalmology", "aankh": "ophthalmology",
+    "ophthalmologist": "ophthalmology", "opthamology": "ophthalmology",
+    # psychiatry
+    "psychiatrist": "psychiatry", "mental health": "psychiatry",
+    "manas rog": "psychiatry", "depression": "psychiatry",
+    # oncology
+    "cancer": "oncology", "tumor": "oncology", "oncologist": "oncology",
+    # nephrology
+    "kidney": "nephrology", "gurde": "nephrology", "dialysis": "nephrology",
+    "nephrologist": "nephrology",
+    # endocrinology
+    "endocrinologist": "endocrinology", "diabetes specialist": "endocrinology",
+    "thyroid specialist": "endocrinology", "hormones": "endocrinology",
+    # gastroenterology
+    "gastro": "gastroenterology", "gastroenterologist": "gastroenterology",
+    "stomach": "gastroenterology", "liver": "gastroenterology",
+    "pet specialist": "gastroenterology", "piles": "gastroenterology",
+    # pulmonology
+    "pulmonologist": "pulmonology", "lung": "pulmonology", "lungs": "pulmonology",
+    "asthma": "pulmonology", "tb": "pulmonology", "respiratory": "pulmonology",
 }
 
 
@@ -167,6 +197,44 @@ def _slot_dict(slot: Appointment) -> dict:
         "date": slot.slot_date,
         "time": slot.slot_time,
     }
+
+
+async def get_hospital_availability() -> str:
+    """Single query: fetch the earliest open slot per department across all
+    15 departments. Returns a compact plain-text summary injected into the
+    scheduler LLM context so it can answer department questions without extra
+    DB calls.
+
+    Example output:
+      general: Dr. Priya Sharma (09:00)
+      cardiology: Dr. Ramesh Kumar (14:00)
+      gynecology: available
+      neurology: not available today
+    """
+    from sqlalchemy import text
+    async with async_session() as session:
+        # One query — DISTINCT ON gets the earliest slot per department
+        result = await session.execute(
+            text("""
+                SELECT DISTINCT ON (department)
+                    department, doctor_name, slot_date, slot_time
+                FROM appointments
+                WHERE status = 'open'
+                ORDER BY department, slot_date, slot_time
+            """)
+        )
+        rows = result.fetchall()
+
+    available: dict[str, str] = {row.department: f"{row.doctor_name} ({row.slot_time})" for row in rows}
+    lines = []
+    for dept in VALID_DEPARTMENTS:
+        if dept in available:
+            lines.append(f"  {dept}: {available[dept]}")
+        else:
+            lines.append(f"  {dept}: not available today")
+
+    logger.debug("db: get_hospital_availability -> %d departments with slots", len(available))
+    return "\n".join(lines)
 
 
 async def check_available_slots(department: str, date: str) -> list[dict]:

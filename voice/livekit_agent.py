@@ -45,7 +45,10 @@ from livekit.agents import Agent, AgentSession, JobContext, ModelSettings, UserI
 from livekit.agents.llm import ChatContext, Tool
 from livekit.plugins import sarvam
 
+import atexit
+
 from langsmith import trace as ls_trace
+import langsmith
 
 from agents.graph import inbound_graph
 from agents.state import AgentState
@@ -53,6 +56,18 @@ from agents.tools.redis_tools import redis_get, save_session_state
 from agents.tools.translate_tools import translate_text, sarvam_identify_language
 
 logger = logging.getLogger("livekit-agent")
+
+
+def _flush_langsmith() -> None:
+    """Flush LangSmith's background tracing threads before the worker process exits.
+    Without this, the non-daemon threads block exit and log noisy warnings."""
+    try:
+        langsmith.Client().flush()
+    except Exception:
+        pass
+
+
+atexit.register(_flush_langsmith)
 
 # Entries are either a substring (str) or a tuple of tokens that must ALL be
 # present (any order, any distance). Tuples handle intervening words —
@@ -130,11 +145,17 @@ def _initial_state(call_id: str) -> AgentState:
         "optimistic_patient_id": None,
         "prefetched_slots": None,
         "intent_classifier_scores": None,
+        # Agent 2 (Voice Intake) — booking context
+        "hospital_availability": None,
+        # Agent 3 (Scheduler)
+        "department_confirmed": None,
         # Agent 6 (Lab Status)
         "lab_reports_dispatched": None,
         # Agent 7 (Billing)
         "bill_amount_due": None,
         "bill_sms_sent": None,
+        # Error recovery
+        "use_fallback_wav": None,
     }
 
 
@@ -234,7 +255,21 @@ class HospitalReceptionistAgent(Agent):
                 self._prev_agent = current_agent
         except Exception:
             logger.exception("inbound_graph failed for call %s", self.state["call_id"])
-            return "Sorry, something went wrong. Let me connect you to a staff member."
+            self.state["escalation_required"] = True
+            self.state["escalation_reason"] = "Graph exception"
+            await self._play_fallback_wav()
+            return ""
+
+        # Fallback WAV intercept — agent_voice_intake sets this flag when the LLM
+        # is unrecoverable. Play a pre-recorded WAV via the frontend data channel
+        # and return empty string so TTS never fires.
+        if self.state.get("use_fallback_wav"):
+            self.state["escalation_required"] = True
+            self.state["escalation_reason"] = self.state.get("escalation_reason") or "LLM unrecoverable"
+            self.state.pop("use_fallback_wav", None)
+            await self._play_fallback_wav()
+            await save_session_state(self.state["call_id"], json.dumps(self.state))
+            return ""
 
         # Crash-recovery snapshot (Redis Layer 2, TTL 30 min).
         await save_session_state(self.state["call_id"], json.dumps(self.state))
@@ -330,6 +365,19 @@ class HospitalReceptionistAgent(Agent):
 
         return reply
 
+    async def _play_fallback_wav(self) -> None:
+        """Signal the frontend to play a pre-recorded fallback WAV.
+
+        Sends a data-channel event; the frontend plays
+        /fallback/<lang>.wav locally. Returns immediately — no TTS round trip,
+        no dependency on the Sarvam API being healthy at the moment of failure.
+        """
+        lang_code = self.state.get("lang_code", "hi-IN")
+        await self._publish({"type": "play_fallback", "lang": lang_code})
+        await self._publish({"type": "agent_change", "agent": "human_handoff"})
+        logger.info("_play_fallback_wav: sent play_fallback event for lang=%s (call_id=%s)",
+                    lang_code, self.state.get("call_id"))
+
     def _check_emergency(self, text: str) -> str | None:
         """Return the first matched emergency keyword, or None."""
         return detect_emergency(text, self.state.get("lang_code", "hi-IN"))
@@ -365,14 +413,38 @@ class HospitalReceptionistAgent(Agent):
         return reply
 
     async def _enforce_output_language(self, reply: str) -> str:
-        """Guardrail 3: translate reply to state lang_code if LLM responded in wrong language."""
+        """Guardrail 3: ensure reply is in the correct language AND script.
+
+        Two checks:
+        1. Language detection — if LLM replied in wrong language, translate.
+        2. Script check — for Devanagari languages (hi-IN, mr-IN), if the reply
+           has no Devanagari characters the LLM used Roman transliteration.
+           Force-translate back to get proper script. This is a separate failure
+           mode from language detection — romanized Hindi passes as 'hi-IN' but
+           sounds wrong when read aloud (TTS treats it as English pronunciation).
+        """
+        expected = self.state.get("lang_code", "hi-IN")
+
+        # Script check — runs first, cheaper than an API call
+        if expected in ("hi-IN", "mr-IN") and len(reply) > 5:
+            has_devanagari = any("ऀ" <= c <= "ॿ" for c in reply)
+            if not has_devanagari:
+                logger.warning(
+                    "GUARDRAIL[script_check]: reply has no Devanagari for lang=%s — forcing retranslation (call_id=%s)",
+                    expected, self.state.get("call_id"),
+                )
+                try:
+                    return await translate_text(reply, source_lang="hi-IN", target_lang=expected)
+                except Exception:
+                    logger.exception("GUARDRAIL[script_check]: retranslation failed — using original")
+                return reply
+
         try:
             detected = await sarvam_identify_language(reply)
         except Exception:
             logger.exception("GUARDRAIL[lang_consistency]: identify_language failed — skipping check")
             return reply
 
-        expected = self.state.get("lang_code", "hi-IN")
         if detected != expected:
             logger.warning(
                 "GUARDRAIL[lang_consistency]: reply lang=%s, expected=%s — correcting (call_id=%s)",
@@ -576,5 +648,14 @@ async def entrypoint(ctx: JobContext) -> None:
     # Calling session.say() here would produce a duplicate ~6-7s later — skip it.
 
 
+def prewarm(proc):
+    """Pre-import the heavy graph + DB modules in idle worker processes so that
+    when a job arrives the subprocess is already warm and accepts within the
+    assignment timeout window (default 3 s). Without this the cold-import of
+    LangGraph + SQLAlchemy + agents.graph takes ~2.8 s, which races the timeout."""
+    from agents.graph import inbound_graph  # noqa: F401 — side-effect: warms module cache
+    from agents.tools.db_tools import get_patient_record  # noqa: F401
+
+
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))

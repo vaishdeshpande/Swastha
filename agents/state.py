@@ -51,12 +51,19 @@ class AgentState(TypedDict):
     call_outcome: Optional[dict]            # Written by post-call subgraph
     call_start_time: Optional[str]          # ISO timestamp
 
+    # ── Set by Agent 2 (Voice Intake) when intent=book ──
+    hospital_availability: Optional[str]    # Compact plain-text: "general: Dr. X (09:00)\ncardiology: ..."
+                                            # Injected into scheduler prompt so LLM knows all
+                                            # departments without extra DB calls mid-conversation.
+
     # ── Set by Agent 3 (Scheduler) ──
     offered_slots: Optional[List[dict]]     # Slots most recently read out to the patient
     appointment_id: Optional[str]           # Appointment being booked/cancelled/confirmed
     booked_slot_details: Optional[dict]     # {doctor_name, department, date, time} — captured
                                             # before offered_slots is cleared; powers the
                                             # booking_confirmed UI card in livekit_agent
+    department_confirmed: Optional[bool]    # True once patient has confirmed the department.
+                                            # Prevents re-asking confirmation on re-entry.
 
     # ── Outbound graph only ──
     job_type: Optional[Literal["confirmation", "rx_reminder", "followup"]]
@@ -73,3 +80,8 @@ class AgentState(TypedDict):
     # ── Set by Agent 7 (Billing) — for frontend data channel event ──
     bill_amount_due: Optional[float]    # Amount read to patient (INR)
     bill_sms_sent: Optional[bool]       # True if payment link was dispatched via SMS
+
+    # ── Error recovery ──
+    use_fallback_wav: Optional[bool]    # Set by voice_intake when LLM is unrecoverable.
+                                        # livekit_agent plays frontend/public/fallback/<lang>.wav
+                                        # and returns "" so TTS never fires.

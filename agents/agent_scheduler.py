@@ -44,23 +44,42 @@ _DATE_SIGNALS = [
     "शनिवार", "रविवार", "tomorrow", "today",
 ]
 
+_DEPARTMENT_LABELS: dict[str, str] = {
+    "general": "General Physician",
+    "cardiology": "Cardiology (Heart)",
+    "ortho": "Orthopaedics (Bone & Joint)",
+    "pediatrics": "Paediatrics (Child)",
+    "dermatology": "Dermatology (Skin)",
+    "gynecology": "Gynaecology (Women's Health)",
+    "neurology": "Neurology (Brain & Nerves)",
+    "ent": "ENT (Ear, Nose & Throat)",
+    "ophthalmology": "Ophthalmology (Eye)",
+    "psychiatry": "Psychiatry (Mental Health)",
+    "oncology": "Oncology (Cancer)",
+    "nephrology": "Nephrology (Kidney)",
+    "endocrinology": "Endocrinology (Hormones)",
+    "gastroenterology": "Gastroenterology (Stomach & Gut)",
+    "pulmonology": "Pulmonology (Lungs & Breathing)",
+}
+
 
 def _first_turn_fast_path(state: AgentState, entered_from: str) -> bool:
-    """True when the scheduler can skip the LLM because the decision is
-    deterministic per the prompt's own Step 1 rule (no slots offered yet →
-    check_slots with date=any).
+    """True when the scheduler can deterministically confirm the department
+    without an LLM call. Fires on the very first scheduler turn (from
+    voice_intake, no slots offered, no prior department confirmation).
 
-    Only fires when the scheduler was entered in the SAME graph pass as
-    voice_intake (entered_from=="voice_intake"): intake's LLM just read this
-    utterance and judged it a clean booking intent, so distress/cancel/clarify
-    have effectively been screened this turn. Any direct entry (patient
-    replying to a scheduler question, outbound flow) still gets the LLM."""
+    The response is fully predictable — we already know the department and
+    can build the confirmation message from _DEPARTMENT_LABELS alone.
+    Any subsequent turn (patient replied, cancel/reschedule, date named)
+    goes through the LLM."""
     if entered_from != "voice_intake":
         return False
     if state.get("offered_slots"):
-        return False  # slot matching ("pehla wala", "do baje") needs the LLM
+        return False
     if state.get("appointment_id"):
-        return False  # existing appointment in play — cancel/reschedule needs the LLM
+        return False
+    if state.get("department_confirmed"):
+        return False  # already confirmed — don't re-ask
     last_user = next(
         (m["content"] for m in reversed(state.get("messages", [])) if m["role"] == "user"),
         "",
@@ -68,7 +87,7 @@ def _first_turn_fast_path(state: AgentState, entered_from: str) -> bool:
     if any(sig in last_user for sig in _CANCEL_RESCHEDULE_SIGNALS):
         return False
     if any(sig in last_user for sig in _DATE_SIGNALS):
-        return False  # patient named a date — LLM must extract it
+        return False
     return True
 
 
@@ -80,6 +99,8 @@ async def _decide_scheduler_action(state: AgentState) -> dict:
         lang_code=state["lang_code"],
         department=state.get("department"),
         offered_slots=state.get("offered_slots"),
+        department_confirmed=state.get("department_confirmed"),
+        hospital_availability=state.get("hospital_availability"),
     )
     messages = [{"role": "system", "content": system_prompt}, *state["messages"]]
 
@@ -112,7 +133,7 @@ async def _decide_scheduler_action(state: AgentState) -> dict:
 
 
 def _format_slot_options(slots: list[dict]) -> str:
-    lines = [f"- {s['doctor_name']}, {s['department']}, {s['time']}" for s in slots]
+    lines = [f"- {s['doctor_name']}, {s['department']}, {s.get('date', '')}, {s['time']}" for s in slots]
     return "\n".join(lines)
 
 
@@ -122,9 +143,9 @@ async def scheduler_node(state: AgentState) -> AgentState:
     logger.info("scheduler: start (call_id=%s, department=%s)", state.get("call_id"), state.get("department"))
 
     if _first_turn_fast_path(state, entered_from):
-        # Deterministic per prompt Step 1 — no LLM call needed.
-        logger.info("scheduler: first-turn fast path — check_slots(date=any) without LLM")
-        decision = {"action": "check_slots", "date": "any", "chosen_slot_id": None,
+        # Deterministic: confirm department before showing slots — no LLM needed.
+        logger.info("scheduler: first-turn fast path — confirm_department without LLM")
+        decision = {"action": "confirm_department", "date": "any", "chosen_slot_id": None,
                     "cancel_appointment_id": None, "distress": False, "reply": None}
     else:
         decision = await _decide_scheduler_action(state)
@@ -145,10 +166,21 @@ async def scheduler_node(state: AgentState) -> AgentState:
     if action == "clarify":
         reply = decision.get("reply")
         if not reply:
-            # LLM returned clarify with no reply text — generate a department confirmation.
+            # LLM returned clarify with no text. If department not yet confirmed,
+            # re-ask confirmation. Otherwise ask the patient to choose a slot.
             dept = state.get("department", "general")
-            reply = f"Aapke liye {dept} specialist se appointment book karein? Kya yeh theek hai?"
-        if lang_code not in ("hi-IN", "en-IN"):
+            dept_label = _DEPARTMENT_LABELS.get(dept, dept)
+            if not state.get("department_confirmed"):
+                reply_en = f"We have a {dept_label} available. Would you like to book an appointment with them?"
+            elif state.get("offered_slots"):
+                reply_en = "Which slot would you prefer? Please choose from the options I mentioned."
+            else:
+                reply_en = f"Shall I check the available slots for the {dept_label}?"
+            try:
+                reply = await translate_text(reply_en, source_lang="en-IN", target_lang=lang_code)
+            except Exception:
+                reply = reply_en
+        elif lang_code not in ("hi-IN", "en-IN"):
             try:
                 reply = await translate_text(reply, "hi-IN", lang_code)
             except Exception:
@@ -156,15 +188,42 @@ async def scheduler_node(state: AgentState) -> AgentState:
         messages.append({"role": "assistant", "content": reply})
         return {**state, "messages": messages}
 
+    if action == "confirm_department":
+        # First scheduler turn: tell patient which department we found and ask if
+        # that's what they want. Slots are already pre-fetched in Redis from
+        # voice_intake (Scenario 2) so waiting for the patient's "haan" costs nothing.
+        dept = normalize_department(state.get("department") or "general")
+        if dept == "unknown":
+            dept = "general"
+        dept_label = _DEPARTMENT_LABELS.get(dept, dept)
+        confirm_en = (
+            f"We have a {dept_label} available for you. "
+            f"Shall I check the available appointment slots?"
+        )
+        reply = await translate_text(confirm_en, source_lang="en-IN", target_lang=lang_code)
+        messages.append({"role": "assistant", "content": reply})
+        logger.info("scheduler: asked department confirmation for dept=%s", dept)
+        return {**state, "messages": messages, "department": dept}
+
     if action == "check_slots":
         date = decision.get("date") or "any"
-        raw_dept = state.get("department") or "general"
-        dept = normalize_department(raw_dept)
-        if dept != raw_dept:
-            logger.info("scheduler: normalized department %r → %r", raw_dept, dept)
-            state = {**state, "department": dept}
 
-        # Unknown department — tell the patient and offer general physician instead.
+        # Patient may have specified a different department — LLM sets decision["department"].
+        requested_dept = decision.get("department")
+        if requested_dept:
+            raw_dept = requested_dept
+            dept = normalize_department(raw_dept)
+            logger.info("scheduler: patient requested dept change %r → %r", raw_dept, dept)
+        else:
+            raw_dept = state.get("department") or "general"
+            dept = normalize_department(raw_dept)
+            if dept != raw_dept:
+                logger.info("scheduler: normalized department %r → %r", raw_dept, dept)
+
+        state = {**state, "department": dept if dept != "unknown" else "general",
+                 "department_confirmed": True}
+
+        # Unknown department — fall back to general physician and let patient know.
         if dept == "unknown":
             logger.info("scheduler: unknown department=%r — offering general physician", raw_dept)
             unknown_msg_en = (
@@ -172,20 +231,20 @@ async def scheduler_node(state: AgentState) -> AgentState:
                 "However, our General Physician can evaluate you and refer you to the right specialist. "
                 "Would you like me to book an appointment with our General Physician?"
             )
-            dept = "general"
             reply = await translate_text(unknown_msg_en, source_lang="en-IN", target_lang=lang_code)
             messages.append({"role": "assistant", "content": reply})
             return {**state, "messages": messages, "department": "general"}
 
-        # Scenario 2: read pre-fetched cache written by voice_intake (sub-10ms vs Supabase)
-        slots = await get_cached_slots(state["department"], date)
+        # Scenario 2: read pre-fetched cache written by voice_intake (sub-10ms vs Supabase).
+        # Use resolved `dept` — state["department"] may lag if dept was just changed.
+        slots = await get_cached_slots(dept, date)
         if slots is not None:
-            logger.info("scheduler: slot cache HIT for department=%s date=%s (%d slot(s))", state["department"], date, len(slots))
+            logger.info("scheduler: slot cache HIT for department=%s date=%s (%d slot(s))", dept, date, len(slots))
         else:
-            slots = await check_available_slots(state["department"], date)
+            slots = await check_available_slots(dept, date)
             if not slots:
-                logger.info("scheduler: no slots for department=%s date=%s, checking next available", state["department"], date)
-                slots = await get_next_available(state["department"], 3)
+                logger.info("scheduler: no slots for department=%s date=%s, checking next available", dept, date)
+                slots = await get_next_available(dept, 3)
             else:
                 slots = slots[:3]
         logger.info("scheduler: offering %d slot(s)", len(slots))
@@ -195,6 +254,28 @@ async def scheduler_node(state: AgentState) -> AgentState:
         reply = await translate_text(reply_en, source_lang="en-IN", target_lang=lang_code)
         messages.append({"role": "assistant", "content": reply})
         return {**state, "messages": messages, "offered_slots": slots}
+
+    if action == "confirm_booking" and not state.get("offered_slots"):
+        # Patient said "confirm" before seeing any slots — they're confused or
+        # jumped ahead. Show them slots instead of going silent.
+        logger.info(
+            "scheduler: confirm_booking with no offered_slots — redirecting to check_slots (call_id=%s)",
+            state.get("call_id"),
+        )
+        dept = normalize_department(state.get("department") or "general")
+        if dept == "unknown":
+            dept = "general"
+        slots = await get_cached_slots(dept, "any") or await check_available_slots(dept, "any") or await get_next_available(dept, 3)
+        slots = slots[:3]
+        redirect_en = "Let me first show you the available slots so you can choose one."
+        redirect = await translate_text(redirect_en, source_lang="en-IN", target_lang=lang_code)
+        options_en = _format_slot_options(slots)
+        slots_reply = await translate_text(
+            f"Here are the available slots:\n{options_en}" if slots else "No slots are available right now.",
+            source_lang="en-IN", target_lang=lang_code,
+        )
+        messages.append({"role": "assistant", "content": f"{redirect} {slots_reply}"})
+        return {**state, "messages": messages, "offered_slots": slots, "department_confirmed": True}
 
     if action == "confirm_booking":
         slot_id = decision.get("chosen_slot_id")
@@ -250,13 +331,14 @@ async def scheduler_node(state: AgentState) -> AgentState:
         messages.append({"role": "assistant", "content": reply})
         return {**state, "messages": messages, "offered_slots": slots, "appointment_id": None}
 
-    # Unknown action — fall back to a clarifying loop rather than crash the call.
+    # Unknown action — always produce a spoken reply so the patient never hears silence.
     logger.warning("scheduler: unrecognized action=%r, falling back to clarify loop", action)
-    fallback_hi = "Kya aap appointment book karna chahte hain?"
+    fallback_en = "I want to make sure I help you correctly. Would you like to book an appointment or choose from the available slots?"
     try:
-        fallback = await translate_text(fallback_hi, "hi-IN", lang_code) if lang_code not in ("hi-IN", "en-IN") else fallback_hi
+        fallback = await translate_text(fallback_en, source_lang="en-IN", target_lang=lang_code)
     except Exception:
-        fallback = fallback_hi
+        logger.exception("scheduler: fallback translation failed — using English")
+        fallback = fallback_en
     messages.append({"role": "assistant", "content": fallback})
     return {**state, "messages": messages}
 
