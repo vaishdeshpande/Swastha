@@ -67,11 +67,15 @@ async def _run_checklist_turn(state: AgentState, discharge: dict, collected: dic
     import asyncio
 
     def _sync_call() -> str:
+        # max_tokens must cover reasoning_content too — sarvam-30b spends its
+        # budget on chain-of-thought first and returns content=None if it runs
+        # out (finish_reason='length'). 4096 leaves room for both.
         response = client.chat.completions(
             messages=[{"role": "system", "content": system_prompt}, *state["messages"]],
             model="sarvam-30b",
             temperature=0.0,
-            max_tokens=2048,
+            max_tokens=4096,
+            reasoning_effort="low",
         )
         return response.choices[0].message.content or ""
 

@@ -211,17 +211,19 @@ async def _run_prescription_turn(state: dict, patient_info: dict) -> tuple[str, 
     )
     notes = p.get("notes_en", "")
 
-    # Two-pass: ask for the reply as plain text first (more reliable than JSON),
-    # then decide done separately based on a simple keyword signal.
+    # sarvam-30b is a reasoning model: with default effort it can burn the whole
+    # max_tokens budget on chain-of-thought and return content=None
+    # (finish_reason='length'). reasoning_effort="low" + a large budget keeps
+    # the thinking short and guarantees room for the actual reply.
     system = (
         f"You are a hospital receptionist calling a patient about their medicines.\n"
         f"Prescription details:\n{med_lines}\n"
         f"Doctor's notes: {notes}\n\n"
         f"Answer the patient's question using ONLY the prescription above. "
-        f"Do not invent any medical advice not written above. "
-        f"If the patient has no more questions and the call is naturally ending, "
-        f"end your reply with the exact token [DONE].\n\n"
-        f"CRITICAL: Reply entirely in {lang}. No English words at all."
+        f"Do not invent any medical advice not written above.\n\n"
+        f"The reply MUST be entirely in {lang}. No English words at all.\n"
+        f'Output JSON only: {{"reply": "<spoken text in {lang}>", "done": true|false}}\n'
+        f"Set done=true when the patient has no more questions and the call is naturally ending."
     )
 
     def _call() -> str:
@@ -229,32 +231,34 @@ async def _run_prescription_turn(state: dict, patient_info: dict) -> tuple[str, 
             messages=[{"role": "system", "content": system}, *state["messages"]],
             model="sarvam-30b",
             temperature=0.3,
-            max_tokens=400,
+            max_tokens=4096,
+            reasoning_effort="low",
         )
         return (r.choices[0].message.content or "").strip()
 
-    # Up to 2 attempts — empty output and timeouts are both treated as retryable
+    # Up to 2 attempts — timeouts, empty and degenerate outputs are all retryable
     for attempt in (1, 2):
         try:
-            raw = await asyncio.wait_for(asyncio.to_thread(_call), timeout=20.0)
+            raw = await asyncio.wait_for(asyncio.to_thread(_call), timeout=25.0)
         except asyncio.TimeoutError:
             logger.error("demo: rx_reminder LLM timed out (attempt %d)", attempt)
             continue
 
         logger.info("demo: rx_reminder raw LLM output (attempt %d): %r", attempt, raw[:200])
 
-        # Model sometimes wraps the answer in JSON despite the plain-text instruction
-        if raw.startswith("{") or '"reply"' in raw:
-            parsed = extract_json(raw)
-            if parsed and str(parsed.get("reply", "")).strip():
-                return str(parsed["reply"]).strip(), bool(parsed.get("done", False))
+        parsed = extract_json(raw)
+        if parsed is not None:
+            reply = str(parsed.get("reply") or "").strip()
+            done = bool(parsed.get("done", False))
+        else:
+            reply = raw
+            done = False
 
-        done = "[DONE]" in raw
-        reply = raw.replace("[DONE]", "").strip()
-        if reply:
+        # Degenerate outputs seen in testing: empty, or the literal lang code
+        if len(reply) >= 4 and reply != lang:
             return reply, done
 
-        logger.warning("demo: rx_reminder empty reply on attempt %d, retrying", attempt)
+        logger.warning("demo: rx_reminder degenerate reply %r on attempt %d, retrying", reply[:40], attempt)
 
     return "", False
 
@@ -565,7 +569,7 @@ async def reply_outbound_demo(body: ReplyRequest) -> ReplyResponse:
         )
 
     # ── rx_reminder: multi-turn — LLM answers queries using prescription context ──
-    else:
+    elif job_type == "rx_reminder":
         patient_info = session.get("patient_info", {})
         reply, done = await _run_prescription_turn(state, patient_info)
         if reply:
@@ -578,4 +582,19 @@ async def reply_outbound_demo(body: ReplyRequest) -> ReplyResponse:
             current_agent="prescription_outbound",
             call_outcome=state.get("call_outcome") if done else None,
             done=done,
+        )
+
+    # ── confirmation: single-pass — one contextual wrap-up then done ──
+    else:
+        patient_info = session.get("patient_info", {})
+        reply = await _generate_wrap_up(state, job_type, patient_info)
+        if reply:
+            state["messages"].append({"role": "assistant", "content": reply})
+        session["done"] = True
+        logger.info("demo: confirmation wrap-up done (session=%s)", body.session_id)
+        return ReplyResponse(
+            agent_message=reply,
+            current_agent="scheduler_outbound",
+            call_outcome=state.get("call_outcome"),
+            done=True,
         )

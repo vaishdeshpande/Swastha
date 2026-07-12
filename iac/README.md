@@ -1,84 +1,129 @@
-# IAC — Infrastructure as Code
+# IAC — Bring Everything Up
 
 Everything needed to provision, seed, run and deploy the hospital receptionist
-stack lives in this folder. One `.env` at the repo root drives all of it
-(copy `.env.example` and fill in values).
+stack lives in this folder. One `.env` at the **repo root** drives all of it.
 
-## Deployment topology
+## TL;DR — one command
 
-| Piece | Where | How |
+```bash
+cp .env.example .env       # fill in the Required vars below (once)
+./iac/run_local.sh         # brings up EVERYTHING locally
+```
+
+That single script, in order:
+
+1. Checks tools (`uv`, `node`, `npm`) and required env vars — fails fast with a clear message
+2. Creates a Python 3.11 venv with **uv** and installs `requirements.txt`
+3. Creates / verifies all 8 Supabase tables and **seeds demo data if the DB is empty**
+   (15 doctors, 10 patients, slots, prescriptions, follow-ups, lab reports, bills)
+4. Installs frontend npm dependencies
+5. Starts three services in the background:
+   - **FastAPI backend** → http://localhost:8000 (docs at `/docs`)
+   - **LiveKit agent worker** → registers with LiveKit Cloud (voice pipeline)
+   - **Next.js frontend** → http://localhost:3000 (admin at `/admin`)
+6. Waits for the backend `/health` check to pass
+
+```bash
+./iac/run_local.sh --reset    # wipe + re-create + re-seed the DB, then start everything
+./iac/run_local.sh --seed     # DB setup + seed only, no services
+./iac/run_local.sh --stop     # take everything down (or just Ctrl+C)
+```
+
+Logs stream to `iac/.logs/{backend,livekit,frontend}.log`; PIDs live in `iac/.pids/`.
+The script is idempotent — rerunning it is always safe.
+
+## Environment variables
+
+All of these go in `.env` at the repo root (`cp .env.example .env`). The run
+script validates the **Required** ones on startup and refuses to boot without them.
+
+### Required — `run_local.sh` will not start without these
+
+| Variable | What it is | Where to get it |
 |---|---|---|
-| Frontend (Next.js) | **Vercel**, linked to GitHub | Push to `main` → Vercel auto-builds. `deploy_frontend_vercel.sh` syncs env vars + pushes. |
-| Backend (FastAPI + LiveKit agent worker) | **Local machine, exposed via ngrok** | `deploy_backend_ngrok.sh` starts both processes and opens an HTTPS tunnel. |
-| Database | **Supabase PostgreSQL** | Schema in `supabase_schema.sql`; auto-created + seeded by `db_setup.py`. |
-| Short-term memory | **Upstash Redis** | No provisioning script needed — keys are created lazily with TTLs. |
-| Voice infra | **LiveKit Cloud** | Managed; only needs `LIVEKIT_*` env vars. |
+| `SARVAM_API_KEY` | Sarvam AI key for STT / LLM / TTS / Translate | [dashboard.sarvam.ai](https://dashboard.sarvam.ai) |
+| `DATABASE_URL` | Postgres connection string, **`postgresql+asyncpg://` scheme** | Supabase → Project Settings → Database |
+| `LIVEKIT_URL` | `wss://…livekit.cloud` — WebRTC endpoint (browser + worker both use it) | LiveKit Cloud → Project → Settings |
+| `LIVEKIT_API_KEY` | Server-side key for minting room tokens | LiveKit Cloud → Settings → Keys |
+| `LIVEKIT_API_SECRET` | Secret paired with the key | same place |
 
-## Files
+### Required for full functionality (agents fail at runtime without them)
+
+| Variable | Used by |
+|---|---|
+| `UPSTASH_REDIS_REST_URL` | Short-term memory: recent calls, sessions, language pref, slot cache |
+| `UPSTASH_REDIS_REST_TOKEN` | same |
+| `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` | Supabase REST access |
+
+### Optional — features degrade gracefully
+
+| Variable | Enables |
+|---|---|
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` | Outbound SMS / WhatsApp confirmations |
+| `ON_CALL_DOCTOR_PHONE` | Escalation call target |
+| `SLACK_WEBHOOK_URL` | Escalation alerts to Slack |
+| `LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT` | LangSmith tracing of the agent graph |
+| `PORT` | Backend port (default `8000`) |
+| `LOG_LEVEL` | Backend log verbosity (default `INFO`) |
+| `FRONTEND_URL` | CORS origin for the deployed frontend |
+
+### Deploy-only — used by the `deploy_*` scripts, not by local runs
+
+| Variable | Used by | Purpose |
+|---|---|---|
+| `BACKEND_URL` | `deploy_frontend_vercel.sh` | Public backend URL (your ngrok URL) synced to Vercel as `NEXT_PUBLIC_BACKEND_URL` |
+| `NGROK_DOMAIN` | `deploy_backend_ngrok.sh` | Optional reserved ngrok domain so the URL survives restarts |
+
+### Frontend note
+
+The browser only sees vars prefixed **`NEXT_PUBLIC_`**, and they are baked in
+at **build time**. You never set them by hand:
+
+- Locally, `run_local.sh` injects `NEXT_PUBLIC_BACKEND_URL` (localhost) and
+  `NEXT_PUBLIC_LIVEKIT_URL` (from `LIVEKIT_URL`) when starting `next dev`.
+- On Vercel, the deploy scripts sync both and trigger a redeploy.
+  (Setting `LIVEKIT_URL` on Vercel does nothing for the browser — it must be
+  the `NEXT_PUBLIC_` name.)
+
+## Deploying
+
+| Piece | Where | Command |
+|---|---|---|
+| Frontend | **Vercel** (project `swastha`, linked to GitHub) | `./iac/deploy_frontend_vercel.sh` — syncs env vars, then git-push triggers the build. `--direct` deploys from local files, `--env-only` just syncs vars. |
+| Backend + agent worker | **Local machine via ngrok tunnel** | `./iac/deploy_backend_ngrok.sh --sync-vercel` — starts both processes, opens the tunnel, points the Vercel frontend at the new URL and redeploys. Needs a one-time `ngrok config add-authtoken <token>`. |
+| Database | **Supabase** (managed) | Auto-provisioned by `db_setup.py` on every run; `supabase_schema.sql` is the reference schema for manual bootstrap. |
+| Redis | **Upstash** (managed) | Nothing to provision — keys are created lazily with TTLs. |
+
+## Database scripts
+
+```bash
+uv run python -m iac.db_setup               # safe/idempotent: create tables + seed only if empty
+uv run python -m iac.db_setup --force-seed  # keep tables, re-run the seeder
+uv run python -m iac.db_reset               # DESTRUCTIVE: drop all 8 tables, re-create, re-seed
+```
+
+## Files in this folder
 
 | File | Purpose |
 |---|---|
-| `run_local.sh` | Run **everything locally** with uv: DB setup + seed, FastAPI backend, LiveKit agent worker, Next.js frontend. |
-| `deploy_backend_ngrok.sh` | Start backend + agent worker and expose them publicly through an ngrok tunnel. `--sync-vercel` pushes the tunnel URL to Vercel and redeploys the frontend. |
-| `deploy_frontend_vercel.sh` | Sync `NEXT_PUBLIC_*` env vars to Vercel and deploy via GitHub push (or `--direct` for a CLI deploy). |
-| `db_setup.py` | Idempotent: create all 8 tables, seed demo data only if the DB is empty. |
-| `db_reset.py` | Destructive: drop all tables, re-create, re-seed fresh demo data. |
-| `supabase_schema.sql` | Reference schema — paste into the Supabase SQL editor for manual bootstrap/inspection. |
-| `vercel.json` | Vercel project config (Next.js framework, deploy from `main`). |
-
-## Quick start
-
-### 1. Run everything locally
-
-```bash
-cp .env.example .env       # fill in Sarvam, LiveKit, Supabase, Upstash keys
-./iac/run_local.sh         # installs deps (uv + npm), sets up DB, starts all 3 services
-```
-
-- Frontend: http://localhost:3000 · Admin: http://localhost:3000/admin
-- Backend: http://localhost:8000 · Docs: http://localhost:8000/docs
-- Logs in `iac/.logs/`, stop with `./iac/run_local.sh --stop` or Ctrl+C
-
-Flags: `--reset` (drop + re-seed DB first), `--seed` (DB only), `--stop`.
-
-### 2. Deploy backend (ngrok)
-
-```bash
-brew install ngrok
-ngrok config add-authtoken <your-token>
-./iac/deploy_backend_ngrok.sh --sync-vercel
-```
-
-Prints a public `https://….ngrok-free.app` URL and, with `--sync-vercel`,
-points the Vercel frontend at it and triggers a redeploy. Set `NGROK_DOMAIN`
-in `.env` if you have a reserved static domain (URL then survives restarts).
-
-### 3. Deploy frontend (Vercel ⇄ GitHub)
-
-```bash
-npm i -g vercel
-./iac/deploy_frontend_vercel.sh
-```
-
-First run walks through `vercel link` interactively and connects the GitHub
-repo. After that, deploys are just commits pushed to `main` — the script
-syncs `NEXT_PUBLIC_BACKEND_URL` / `NEXT_PUBLIC_LIVEKIT_URL` from your `.env`
-and pushes the current branch. Use `--direct` to deploy from local files
-without going through GitHub, `--env-only` to only sync env vars.
-
-### 4. Database only
-
-```bash
-uv run python -m iac.db_setup            # create tables + seed if empty
-uv run python -m iac.db_setup --force-seed
-uv run python -m iac.db_reset            # DESTRUCTIVE: drop + re-create + re-seed
-```
+| `run_local.sh` | **The one script** — full local bring-up (see TL;DR) |
+| `deploy_backend_ngrok.sh` | Backend + agent worker behind an ngrok HTTPS tunnel |
+| `deploy_frontend_vercel.sh` | Vercel env sync + GitHub-push deploy |
+| `db_setup.py` | Idempotent schema create + conditional seed |
+| `db_reset.py` | Destructive drop + re-create + re-seed |
+| `supabase_schema.sql` | Reference SQL for the Supabase SQL editor |
+| `vercel.json` | Vercel project config (Next.js, deploy from `main`) |
 
 ## Gotchas
 
-- **ngrok free tier** rotates the URL on every restart — rerun with
-  `--sync-vercel` after a restart, or reserve a static domain and set `NGROK_DOMAIN`.
-- **Vercel env vars are build-time** (`NEXT_PUBLIC_*`): changing them requires
-  a redeploy, which both scripts handle for you.
-- The LiveKit agent worker connects **outbound** to LiveKit Cloud, so it needs
-  no tunnel — only the FastAPI HTTP API goes through ngrok.
+- **`.env` is sourced by bash** — it must contain only `KEY=value` lines and
+  comments. A stray command in it will execute (this has bitten us before).
+- **`DATABASE_URL` must use `postgresql+asyncpg://`**, not plain `postgresql://` —
+  the backend uses SQLAlchemy's asyncpg driver.
+- **Free-tier ngrok rotates its URL on every restart** — rerun
+  `deploy_backend_ngrok.sh --sync-vercel` after restarting, or reserve a static
+  domain and set `NGROK_DOMAIN`.
+- **Vercel `NEXT_PUBLIC_*` changes need a redeploy** to take effect; the scripts
+  handle that automatically.
+- The LiveKit agent worker connects **outbound** to LiveKit Cloud — only the
+  FastAPI HTTP API needs the ngrok tunnel; voice audio never touches it.
