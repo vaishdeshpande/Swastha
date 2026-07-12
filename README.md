@@ -362,5 +362,3 @@ VALUES (
 > Full suite (11 scenarios) in [`TEST_SCENARIOS.md`](TEST_SCENARIOS.md).
 
 ---
-
-**[Business Deck →](https://docs.google.com/presentation/d/1X_z-PBkejSe7cNxeKU6rqV2tZgx1YHCfu61MFkDo-ys/edit?slide=id.p1#slide=id.p1)**
