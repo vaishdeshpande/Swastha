@@ -10,11 +10,11 @@ from agents.tools.db_tools import get_patient_record_by_id
 
 logger = logging.getLogger(__name__)
 
-SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]
-TWILIO_ACCOUNT_SID = os.environ["TWILIO_ACCOUNT_SID"]
-TWILIO_AUTH_TOKEN = os.environ["TWILIO_AUTH_TOKEN"]
-TWILIO_PHONE_NUMBER = os.environ["TWILIO_PHONE_NUMBER"]
-ON_CALL_DOCTOR_PHONE = os.environ["ON_CALL_DOCTOR_PHONE"]
+SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
+TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER", "")
+ON_CALL_DOCTOR_PHONE = os.environ.get("ON_CALL_DOCTOR_PHONE", "")
 
 
 async def send_slack_alert(message: str) -> None:

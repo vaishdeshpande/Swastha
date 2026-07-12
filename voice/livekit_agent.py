@@ -246,6 +246,18 @@ class HospitalReceptionistAgent(Agent):
         elif confidence is not None and confidence >= 0.3:
             self._low_confidence_count = 0
 
+        # ── Escalation guard: don't re-invoke graph after handoff ─────────────
+        # Once escalation_required is set, the call is handed to a human.
+        # Continuing to run the graph burns LLM budget, risks confusing the
+        # patient with a second AI response, and is the primary cause of the
+        # voice_intake LLM timeout on long post-escalation conversations.
+        if self.state.get("escalation_required"):
+            logger.info(
+                "llm_node: escalation active — skipping graph re-invocation (call_id=%s)",
+                self.state.get("call_id"),
+            )
+            return ""
+
         # ── Main graph invocation ─────────────────────────────────────────────
         try:
             self.state = await inbound_graph.ainvoke(

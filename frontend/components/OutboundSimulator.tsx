@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { getBackendUrl } from "@/lib/livekit";
 import { TranscriptMessage, LangOption } from "@/lib/types";
 import TranscriptPanel from "@/components/TranscriptPanel";
 import LanguageSelector from "@/components/LanguageSelector";
@@ -302,7 +301,7 @@ export default function OutboundSimulator({ jobType, onClose }: Props) {
     setSimState("processing");
 
     try {
-      const res = await fetch(`${getBackendUrl()}/api/demo/outbound/reply`, {
+      const res = await fetch(`/api/demo/outbound/reply`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: sid, message: msg.trim() }),
@@ -367,7 +366,7 @@ export default function OutboundSimulator({ jobType, onClose }: Props) {
     setUserInput("");
 
     try {
-      const res = await fetch(`${getBackendUrl()}/api/demo/outbound/start`, {
+      const res = await fetch(`/api/demo/outbound/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_type: jobType, lang_code: resolvedLang }),

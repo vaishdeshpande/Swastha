@@ -87,9 +87,6 @@ def route_after_language(state: AgentState) -> str:
     node. This eliminates the redundant sarvam-30b extraction call that would
     otherwise run on every turn — ~1.9s TTFT saved per mid-conversation turn.
     """
-    if state.get("escalation_required", False):
-        return "voice_intake"  # let intake path handle escalation display
-
     intent = state.get("intent")
     patient_id = state.get("patient_id")
 

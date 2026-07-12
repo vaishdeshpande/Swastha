@@ -214,7 +214,12 @@ async def _extract_patient_info(
         (parsed_dict, phone_lookup_task | None)
     """
     system_prompt = build_voice_intake_prompt(lang_code, already_collected)
-    full_messages = [{"role": "system", "content": system_prompt}, *messages]
+    # Cap history sent to the LLM: intake only needs recent context to extract
+    # phone/intent/name. Sending all turns (can be 10+) adds tokens that push
+    # sarvam-30b past the 20s timeout without improving extraction quality.
+    MAX_INTAKE_HISTORY = 6
+    trimmed = messages[-MAX_INTAKE_HISTORY:] if len(messages) > MAX_INTAKE_HISTORY else messages
+    full_messages = [{"role": "system", "content": system_prompt}, *trimmed]
     phone_task: asyncio.Task | None = None
 
     try:
