@@ -8,8 +8,7 @@ Swastha is a multi-agent voice receptionist that handles inbound patient calls i
 
 ## Architecture Diagram
 
-<!-- INSERT ARCHITECTURE DIAGRAM HERE -->
-<!-- Recommended: Excalidraw or draw.io export showing the voice pipeline, LangGraph inbound/outbound graphs, API layer, and three-layer memory (RAM → Redis → Supabase) -->
+![Swastha System Architecture](arch.png)
 
 ---
 
@@ -71,7 +70,7 @@ Patient speaks
 Supabase: due_followups / pending_confirmations
       │
   Route Job
-      ├─ job_type=confirmation  → [3] Scheduler outbound    — confirm tomorrow's appointment
+      ├─ job_type=confirmation  → [3] Scheduler outbound    — confirm tomorrow's appointment  ⚠ future scope
       ├─ job_type=rx_reminder   → [4] Prescription outbound — remind patient to take medicines
       └─ job_type=followup      → [5] Follow-up             — post-discharge check (fever, pain, meds)
                                           │
@@ -174,70 +173,32 @@ languages:
 
 ## Local Setup
 
-### 1. Clone and create the virtual environment
+> **Full provisioning guide, deploy scripts, DB commands, and gotchas live in [`iac/README.md`](iac/README.md).**
+
+### The fast path — one command
+
+Requires: **Python 3.11+**, **uv**, **Node 20+**, **npm**, and a filled-in `.env`.
 
 ```bash
 git clone <your-repo-url>
 cd healthcareapp
 
-python3.11 -m venv .venv
-source .venv/bin/activate       # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+cp .env.example .env          # fill in Required vars (Sarvam, LiveKit, Supabase, Redis)
+./iac/run_local.sh            # provisions DB, installs deps, starts all three services
 ```
 
-### 2. Configure environment variables
+`run_local.sh` does everything in order — creates a venv via uv, creates the 8 Supabase tables, seeds demo data if the DB is empty, installs frontend npm deps, then starts FastAPI + LiveKit agent worker + Next.js in the background. Logs stream to `iac/.logs/`.
 
-```bash
-cp .env.example .env
-# Fill in all values — see the Prerequisites table above
+```
+Frontend:  http://localhost:3000
+Backend:   http://localhost:8000
+API docs:  http://localhost:8000/docs
+Admin:     http://localhost:3000/admin
 ```
 
-### 3. Provision the database
-
 ```bash
-# Create all 8 tables in Supabase
-python iac/db_setup.py
-
-# Seed with 10 patients, 5 doctors, open slots, lab reports, bills
-python api/seed.py
-```
-
-### 4. Pre-generate greeting audio (optional but recommended)
-
-Pre-baking the TTS greeting eliminates cold-start latency on the first call.
-
-```bash
-python scripts/generate_greetings.py
-python scripts/generate_fallback_wavs.py
-```
-
-### 5. Start the backend
-
-```bash
-# Terminal 1 — FastAPI + APScheduler cron
-uvicorn api.main:app --reload --port 8000
-
-# Terminal 2 — LiveKit Agent Worker
-python voice/livekit_agent.py dev
-```
-
-API: `http://localhost:8000` · Swagger docs: `http://localhost:8000/docs`
-
-### 6. Start the frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Open `http://localhost:3000`.
-
-### 7. Run the tests
-
-```bash
-# From project root with .venv active
-pytest tests/ -v
+./iac/run_local.sh --reset    # wipe + re-seed the DB, then restart
+./iac/run_local.sh --stop     # take everything down
 ```
 
 ---
@@ -276,47 +237,6 @@ LOG_LEVEL=INFO
 
 ---
 
-## Deployment
-
-### Backend — Railway
-
-```bash
-# Set all env vars in the Railway dashboard, then:
-railway up
-# One service = FastAPI + Agent Worker (single Python process)
-```
-
-### Frontend — Vercel
-
-```bash
-cd frontend
-vercel deploy
-# Set NEXT_PUBLIC_BACKEND_URL to your Railway URL in the Vercel dashboard
-```
-
-**Total monthly cost: ~$5** (Railway starter credit; all other services are free tier).
-
----
-
-## API Reference
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/api/token` | Issue a LiveKit room token for a patient session |
-| `GET` | `/api/slots` | Available appointment slots (filter by department / date) |
-| `POST` | `/api/appointments` | Book a slot |
-| `GET` | `/api/prescriptions/{patient_id}` | Patient's prescriptions |
-| `GET` | `/api/doctors` | List all doctors |
-| `GET` | `/api/lab/{patient_id}` | Lab report statuses |
-| `PATCH` | `/api/lab/{report_id}/dispatched` | Mark a report as dispatched |
-| `GET` | `/api/billing/{patient_id}` | Outstanding bills |
-| `POST` | `/api/billing/{bill_id}/dispatch-link` | Send UPI payment link via SMS |
-| `POST` | `/api/followup/log` | Log an outbound follow-up outcome |
-| `GET` | `/api/analytics/calls` | Aggregated call analytics for the admin dashboard |
-| `GET` | `/health` | Railway health check |
-
-Full interactive docs: `/docs` (Swagger) · `/redoc`
-
 ---
 
 ## Frontend Pages
@@ -340,13 +260,94 @@ After every call the `post_call` LangGraph node runs asynchronously:
 
 ---
 
-## Known Issues
+## Test Scenarios
 
-See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) for the current bug list.
+Seed phone numbers run from `9876543210` through `9876543219`. Use `9999999999` for new patient registration tests.
 
-Feature gaps not yet implemented:
-- Appointment reminder calls (outbound, pre-visit)
-- Prescription refill reminders (outbound, ongoing medication)
+---
+
+### Scenario 1 — New Patient · Hindi · Appointment Booking
+
+**Who you are:** First-time caller, no record in DB.  
+**Language:** Auto-detect or Hindi
+
+```
+"Namaste, mujhe doctor se milna hai. Mere pet mein bahut dard ho raha hai."
+```
+When asked for details:
+```
+"Mera naam Arjun Mehta hai. Mera number hai 9999999999. Mujhe general doctor chahiye."
+```
+
+**Verify:** Patient registered silently (no announcement) · Hindi slots offered · slot booked · Booking card appears on screen.
+
+---
+
+### Scenario 2 — Existing Patient · Marathi · Appointment Booking
+
+**Who you are:** Arun Patil (`9876543212`, Marathi preference)  
+**Language:** Marathi
+
+```
+"Namaskar, mala doctor Anjali Deshmukh yanchi appointment ghyaychi ahe. Maza number 9876543212."
+```
+
+**Verify:** Registration skipped (phone found) · full response in Marathi · TTS switches to Kavya voice · ortho slot booked with Dr. Anjali Deshmukh.
+
+---
+
+### Scenario 3 — Prescription Query · Hindi · Doctor Notes Translation
+
+**Who you are:** Ramesh Kumar (`9876543210`, Hindi)  
+**Language:** Auto-detect
+
+```
+"Meri dawai ke baare mein poochna tha. Mera number 9876543210 hai."
+```
+
+**Verify:** Intent detected as `prescription` · Amlodipine + Aspirin fetched · English doctor notes translated to Hindi before being read aloud · no appointment booking attempted.
+
+---
+
+### Scenario 4 — Hinglish · Ambiguous Intent · Confidence-Gated Fanout
+
+**Who you are:** New caller, code-mixed speech  
+**Language:** Auto-detect
+
+```
+"Hi, mujhe kuch help chahiye. Mera naam Rahul hai."
+```
+When asked what you need:
+```
+"Actually doctor se milna bhi hai, aur apni medicines bhi check karni thi."
+```
+
+**Verify:** Single clarifying question covering both intents (not two separate questions) · no premature escalation · after clarifying "appointment", routes to Scheduler.
+
+---
+
+### Scenario 5 — Outbound Follow-up · Discharge Check
+
+**Who you are:** Sunita Devi (`9876543211`) — discharged 24h ago, follow-up due now.  
+**Trigger manually** (or wait for APScheduler) by inserting a due row into `discharge_followups`:
+
+```sql
+INSERT INTO discharge_followups (patient_id, discharge_date, diagnosis, due_at, status, job_type)
+VALUES (
+  (SELECT id FROM patients WHERE phone = '9876543211'),
+  NOW() - INTERVAL '24 hours',
+  'Hypertension',
+  NOW(),
+  'pending',
+  'followup'
+);
+```
+
+**Verify:** Agent asks about fever, pain level, medication adherence · `readmission_risk` score computed · if risk > 0.7, `escalate_to_doctor()` fires · row updated to `completed` or `escalated`.
+
+---
+
+> Full suite (11 scenarios) in [`TEST_SCENARIOS.md`](TEST_SCENARIOS.md).
 
 ---
 
@@ -358,6 +359,4 @@ Feature gaps not yet implemented:
 - Unit economics: 500 calls/month × ₹2/call = **₹1,000/month vs ₹15,000/month** for a human receptionist
 - ROI payback: **Day 1** — 24/7 availability, 11 Indic languages, zero hold time
 
----
-
-*Built for the Sarvam AI Pre-Sales Take-Home — production-grade, no mocks, no placeholder webhooks.*
+<!-- ATTACH BUSINESS DECK HERE -->
