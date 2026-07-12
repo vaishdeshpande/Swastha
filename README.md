@@ -6,6 +6,18 @@ Swastha is a multi-agent voice receptionist that handles inbound patient calls i
 
 ---
 
+## Live Demo
+
+**[swastha-lovat.vercel.app](https://swastha-lovat.vercel.app/)**
+
+> **Note:** The frontend is deployed on Vercel (always live). The backend runs locally and is exposed via an ngrok tunnel due to free-tier limitations — it may not be reachable if the tunnel is down.
+>
+>  In case it's not running, please reach out directly. To run it yourself, clone the repo and follow the [Local Setup](#local-setup) instructions, or see [`iac/README.md`](iac/README.md).
+
+**[Business Deck →](https://docs.google.com/presentation/d/1X_z-PBkejSe7cNxeKU6rqV2tZgx1YHCfu61MFkDo-ys/edit?slide=id.p1#slide=id.p1)**
+
+---
+
 ## Architecture Diagram
 
 ![Swastha System Architecture](arch.png)
@@ -26,21 +38,21 @@ Swastha is a multi-agent voice receptionist that handles inbound patient calls i
 
 ## Tech Stack
 
-| Layer | Technology | Notes |
-|---|---|---|
-| Voice pipeline | LiveKit Agents SDK + Sarvam plugin | WebRTC audio bridge |
-| STT | Sarvam Saaras v3 | `language=unknown` for auto-detect |
-| LLM | Sarvam sarvam-30b | 1.94s TTFT — fastest for voice latency |
-| TTS | Sarvam Bulbul v3 | 37 native Indic voices (hi-IN, mr-IN) |
-| Translation | Sarvam Mayura v1 | Doctor notes EN → hi-IN / mr-IN |
-| Agent orchestration | LangGraph StateGraph | Inbound + outbound graphs, conditional routing |
-| Backend API | FastAPI + APScheduler | Single process: API + Agent Worker + Cron |
-| Database | Supabase PostgreSQL | 8 tables, free forever |
-| Session cache | Upstash Redis | 3 key patterns, TTL-based, free forever |
-| Frontend | Next.js (App Router) + LiveKit React SDK | Patient voice UI + admin dashboard |
-| Observability | LangSmith | Full LangGraph trace per call |
-| Deploy — backend | Railway | `$5/mo` credit covers the demo |
-| Deploy — frontend | Vercel | Zero-config GitHub deploy |
+| Layer | Technology |
+|---|---|
+| Voice pipeline | LiveKit Agents SDK + Sarvam plugin |
+| STT | Sarvam Saaras v3 |
+| LLM | Sarvam sarvam-30b |
+| TTS | Sarvam Bulbul v3 |
+| Translation | Sarvam Mayura v1 |
+| Agent orchestration | LangGraph StateGraph |
+| Backend API | FastAPI + APScheduler |
+| Database | Supabase PostgreSQL |
+| Session cache | Upstash Redis |
+| Frontend | Next.js (App Router) + LiveKit React SDK |
+| Observability | LangSmith |
+| Deploy — backend | ngrok tunnel (local) |
+| Deploy — frontend | Vercel |
 
 ---
 
@@ -59,7 +71,7 @@ Patient speaks
       ├─ intent=prescription → [4] Prescription   — fetches medicines, translates notes, reads aloud
       ├─ intent=lab         → [6] Lab Status      — looks up report, dispatches via SMS
       ├─ intent=billing     → [7] Billing         — reads bill amount, sends UPI payment link
-      └─ escalation_required → Human Handoff      — translates hand-off message, pings Slack
+      └─ escalation_required → Human Handoff      — translates hand-off message, pings on-call doctor
                                       │
                                [Post-call node]   — analytics, Redis summary, schedules outbound jobs
 ```
@@ -92,7 +104,7 @@ Nine distinct patterns are implemented across the system.
 | 5 | **Multi-Layer Memory** | RAM (`AgentState`) → Upstash Redis (TTL 7–90d) → Supabase (permanent) | Memory |
 | 6 | **Tool-Calling / ReAct** | Agents 3, 4, 5 — LLM decides which tool to call, calls it, observes result, replies | Action |
 | 7 | **Guardrails** | Input: emergency detection, STT confidence gate · Output: language consistency check, medical boundary enforcement, TTS length cap | Reliability |
-| 8 | **Event-Driven / Cron Subgraph** | APScheduler → outbound LangGraph every 30 min — proactive follow-ups, not reactive responses | Action |
+| 8 | **Event-Driven / Cron Subgraph** | Simulation →  — proactive follow-ups, not reactive responses | Action |
 | 9 | **Post-Processing Subgraph** | `post_call_node` — batch STT analytics + Redis summary + outbound job scheduling fires after the patient hangs up | Action |
 
 **Key design notes:**
@@ -262,7 +274,7 @@ After every call the `post_call` LangGraph node runs asynchronously:
 
 ## Test Scenarios
 
-Seed phone numbers run from `9876543210` through `9876543219`. Use `9999999999` for new patient registration tests.
+Seed phone numbers run from `9876543210` through `9876543219`. Use `9876543218` for new patient registration tests.
 
 ---
 
@@ -276,7 +288,7 @@ Seed phone numbers run from `9876543210` through `9876543219`. Use `9999999999` 
 ```
 When asked for details:
 ```
-"Mera naam Arjun Mehta hai. Mera number hai 9999999999. Mujhe general doctor chahiye."
+"Mera naam Arjun Mehta hai. Mera number hai 9876543218. Mujhe general doctor chahiye."
 ```
 
 **Verify:** Patient registered silently (no announcement) · Hindi slots offered · slot booked · Booking card appears on screen.
@@ -351,12 +363,4 @@ VALUES (
 
 ---
 
-## Business Context
-
-- India has **1.5M+ clinics and hospitals**
-- Front-desk staff costs **₹12,000–18,000 / month**
-- **80% of patient queries** are repeatable: appointments, prescriptions, directions, reports
-- Unit economics: 500 calls/month × ₹2/call = **₹1,000/month vs ₹15,000/month** for a human receptionist
-- ROI payback: **Day 1** — 24/7 availability, 11 Indic languages, zero hold time
-
-<!-- ATTACH BUSINESS DECK HERE -->
+**[Business Deck →](https://docs.google.com/presentation/d/1X_z-PBkejSe7cNxeKU6rqV2tZgx1YHCfu61MFkDo-ys/edit?slide=id.p1#slide=id.p1)**
